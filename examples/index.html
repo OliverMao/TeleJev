@@ -82,7 +82,7 @@
   <section id="results">
     <div class="timing" id="timing"></div>
 
-    <h3 style="font-size:13px;margin:18px 0 6px">direct 输出</h3>
+    <h3 style="font-size:13px;margin:18px 0 6px">Jev 输出</h3>
     <pre id="outputDirect"></pre>
 
     <div id="cards"></div>
@@ -254,14 +254,14 @@ function renderCompare(criteria, direct, generation, output) {
     const genAnswer = answers[index] || "?";
     const same = directAnswer === genAnswer;
     if (same) agree += 1;
-    return `<div class="cmp-row"><span>${criterion.label}</span><span>direct：${directAnswer}</span><span>generate：${genAnswer}</span><span>${same ? "✓" : "✗"}</span></div>`;
+    return `<div class="cmp-row"><span>${criterion.label}</span><span>Jev：${directAnswer}</span><span>generate：${genAnswer}</span><span>${same ? "✓" : "✗"}</span></div>`;
   }).join("");
   const directTotal = direct.timing?.inference_seconds ?? direct.timing?.total_seconds;
   const speed = (generation.generate_seconds && directTotal) ? generation.generate_seconds / directTotal : null;
   $("compare").innerHTML = `
     <h3 style="font-size:13px;margin:18px 0 6px">自回归对比（model.generate）</h3>
     <div class="timing">
-      ${timingCard("direct 总耗时", seconds(directTotal))}
+      ${timingCard("Jev 总耗时", seconds(directTotal))}
       ${timingCard("generate 耗时", seconds(generation.generate_seconds))}
       ${timingCard("生成 tokens", generation.new_tokens ?? "?")}
       ${timingCard("tok/s", generation.tokens_per_second ? generation.tokens_per_second.toFixed(1) : "?")}
