@@ -153,7 +153,7 @@ curl -X POST http://127.0.0.1:8000/decide-batch \
   }'
 ```
 
-图像 prefill 1 次 + 判据后缀批量 1 次，共 **2 次前向**，与判据数量无关；各任务的 `suffix_seconds` 是这次批量前向的共享时间。
+图像 prefill 1 次 + 判据后缀批量 1 次，共 **2 次前向**，与判据数量无关。
 
 响应：
 
@@ -166,14 +166,13 @@ curl -X POST http://127.0.0.1:8000/decide-batch \
       "probabilities": {"yes": 0.12, "no": 0.88},
       "has_image": true,
       "image_tokens": 1024,
-      "input_tokens": 312,
-      "prefill_seconds": 0.42,
-      "suffix_seconds": 0.03,
-      "total_seconds": 0.45
+      "input_tokens": 312
     }
   ],
   "timing": {
     "total_seconds": 0.61,
+    "inference_seconds": 0.60,
+    "image_seconds": 0.02,
     "encode_seconds": 0.16,
     "prefill_seconds": 0.42,
     "suffix_seconds": 0.03,
@@ -184,11 +183,11 @@ curl -X POST http://127.0.0.1:8000/decide-batch \
 }
 ```
 
-`timing.total_seconds` 覆盖编码、图像 prefill、判据前向与结果组装；每个任务的 `total_seconds = prefill_seconds + suffix_seconds`。
+`timing.total_seconds` 是**从服务端拿到请求数据到推理完成**的时间（不含客户端与服务器之间的网络传输）；细分：`image_seconds`（图像解码）、`encode_seconds`（prompt 编码）、`prefill_seconds`（图像+state 前向）、`suffix_seconds`（判据前向）。每个任务不再单独计时（shared 模式下它们共享同一次判据前向）。
 
 ### 前端测试页
 
-`examples/index.html` 是单文件多任务测试页：勾选 打架 / 摔倒 / 挥手 / 捂胸口，对同一张画面一次调用 `/decide-batch`，汇总每个任务的“有/无”判定、概率与耗时，并展示整体耗时。可上传图像或用内置 OSS 示例图。
+`examples/index.html` 是单文件多任务测试页：勾选 打架 / 摔倒 / 挥手 / 捂胸口，对同一张画面一次调用 `/decide-batch`，汇总每个任务的“有/无”判定、概率与整体耗时。可上传图像，或点“加载示例图”用页面内嵌的示例（不依赖外网）。
 
 ```bash
 python serve.py --fake          # 启动服务

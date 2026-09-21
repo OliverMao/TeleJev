@@ -158,9 +158,6 @@ def _shared_suffix(model, rows, encoded, prefix_ids, pad, cache, device, prefill
         selected = vocabulary[slots].cpu().tolist()
         result = _result_row(row, slots, prompt_hash, selected, has_image, metadata, "native-shared-prefix-batch-v1")
         result["input_tokens"] = len(ids)
-        result["prefill_seconds"] = prefill_seconds
-        result["suffix_seconds"] = suffix_seconds
-        result["total_seconds"] = prefill_seconds + suffix_seconds
         results.append(result)
     del output
     timing = {
@@ -181,7 +178,9 @@ def score_batch(model, tokenizer, metadata, state, image_ref, criteria, max_toke
         raise ValueError("criteria must be a nonempty list")
     if not isinstance(state, str) or not state:
         raise ValueError("state must be a nonempty string")
+    image_started = time.perf_counter()
     image = load_image(image_ref) if image_ref else None
+    image_seconds = time.perf_counter() - image_started
     if image is not None and processor is None:
         raise ValueError("Image input requires a multimodal processor for this model")
 
@@ -200,6 +199,7 @@ def score_batch(model, tokenizer, metadata, state, image_ref, criteria, max_toke
     if len({row["id"] for row in rows}) != len(rows):
         raise ValueError("Criterion IDs must be unique")
 
+    encode_started = time.perf_counter()
     encoded = [encode_prompt(tokenizer, row, max_tokens, processor, image) for row in rows]
     if image is not None:
         prefix_ids, prefix_extras = _image_prefix(processor, state, image)
@@ -216,8 +216,8 @@ def score_batch(model, tokenizer, metadata, state, image_ref, criteria, max_toke
         raise ValueError("Tokenizer requires a padding or EOS token")
     if "logits_to_keep" not in _forward_signature(model):
         raise RuntimeError("Model lacks selective-position logits needed for batch scoring")
+    encode_seconds = time.perf_counter() - encode_started
 
-    encode_seconds = time.perf_counter() - started
     device = next(model.parameters()).device
     model.eval()
     cache, prefill_seconds = _prefill(model, prefix_ids, prefix_extras, device)
@@ -230,7 +230,8 @@ def score_batch(model, tokenizer, metadata, state, image_ref, criteria, max_toke
         del cache
 
     timing = {
-        "total_seconds": time.perf_counter() - started,
+        "inference_seconds": time.perf_counter() - started,
+        "image_seconds": image_seconds,
         "encode_seconds": encode_seconds,
         "prefill_seconds": prefill_seconds,
         "suffix_seconds": suffix_total,

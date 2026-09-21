@@ -91,7 +91,7 @@ def load_image(reference: str):
             raise ValueError("Image data URI is not valid base64") from error
         return Image.open(io.BytesIO(payload)).convert("RGB")
     if reference.startswith(("http://", "https://")):
-        with urllib.request.urlopen(reference, timeout=30) as response:
+        with urllib.request.urlopen(reference, timeout=10) as response:
             return Image.open(io.BytesIO(response.read())).convert("RGB")
     path = Path(reference)
     if not path.is_file():

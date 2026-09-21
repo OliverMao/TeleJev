@@ -103,10 +103,9 @@ def main() -> None:
         assert len(batch["results"]) == len(BATCH["criteria"])
         for result in batch["results"]:
             assert EXPECTED_KEYS <= set(result), result.keys()
-            assert "total_seconds" in result and "suffix_seconds" in result
         assert batch["results"][0]["has_image"] is True
         timing = batch["timing"]
-        for key in ("total_seconds", "prefill_seconds", "suffix_seconds", "batch_size"):
+        for key in ("total_seconds", "inference_seconds", "image_seconds", "prefill_seconds", "suffix_seconds", "batch_size"):
             assert key in timing, key
         assert timing["batch_size"] == len(BATCH["criteria"])
 

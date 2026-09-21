@@ -81,11 +81,13 @@ class DecisionService:
     def decide_batch(self, body: dict) -> dict:
         if self._batch is None:
             raise ValueError("Batch scoring is not available on this server")
+        started = time.perf_counter()
         state = body.get("state")
         image = body.get("image")
         criteria = body.get("criteria")
         with self._lock:
             results, timing = self._batch(state, image, criteria)
+        timing["total_seconds"] = time.perf_counter() - started
         return {"results": [canonical_decision(result) for result in results], "timing": timing}
 
 
@@ -149,7 +151,6 @@ def fake_batch_scorer():
             maximum = max(logits)
             weights = [math.exp(value - maximum) for value in logits]
             total = sum(weights)
-            per_task = 0.001
             results.append(
                 {
                     "id": criterion.get("id") or f"criterion-{index}",
@@ -161,13 +162,11 @@ def fake_batch_scorer():
                     "input_tokens": 42,
                     "prompt_version": "fake-v1",
                     "probability_status": "fake scorer for interface tests",
-                    "prefill_seconds": 0.002,
-                    "suffix_seconds": per_task,
-                    "total_seconds": 0.002 + per_task,
                 }
             )
         timing = {
-            "total_seconds": time.perf_counter() - started,
+            "inference_seconds": time.perf_counter() - started,
+            "image_seconds": 0.0002,
             "encode_seconds": 0.0005,
             "prefill_seconds": 0.002,
             "suffix_seconds": 0.001 * len(results),

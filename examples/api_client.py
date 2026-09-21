@@ -82,7 +82,7 @@ def main() -> None:
     if image and "--batch" in sys.argv:
         result = post("/decide-batch", batch_body(data_uri(image)))
         for item in result["results"]:
-            print(f"{item['id']}: {item['option_id']} ({item['total_seconds']:.4f}s)")
+            print(f"{item['id']}: {item['option_id']}")
         print("timing:", json.dumps(result["timing"], ensure_ascii=False))
         return
 
