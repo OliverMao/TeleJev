@@ -88,7 +88,7 @@
 <script>
 const BASE = () => document.getElementById("base").value.replace(/\/+$/, "");
 const $ = (id) => document.getElementById(id);
-const SAMPLE_IMAGE = "https://ossv2.yoobit.cn/nife/demo.png";
+const SAMPLE_IMAGE = "https://ossv2.yoobit.cn/nife/fall.png";
 const STATE = "监控画面截图。";
 
 const TASKS = [
@@ -256,7 +256,7 @@ $("sampleImage").addEventListener("click", () => {
   imageData = SAMPLE_IMAGE;
   $("imagePreview").src = imageData;
   $("imagePreview").style.display = "block";
-  $("imageInfo").textContent = "示例图 demo.png（OSS）";
+  $("imageInfo").textContent = "示例图 fall.png（OSS）";
 });
 $("toggleAll").addEventListener("click", () => {
   const boxes = document.querySelectorAll('#tasks input[type="checkbox"]');

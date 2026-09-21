@@ -145,7 +145,7 @@ curl -X POST http://127.0.0.1:8000/decide-batch \
   -H "Content-Type: application/json" \
   -d '{
     "state": "监控画面截图。",
-    "image": "https://ossv2.yoobit.cn/nife/demo.png",
+    "image": "https://ossv2.yoobit.cn/nife/fall.png",
     "criteria": [
       {"id": "fight", "question": "画面中是否有人正在打架？", "options": [{"id": "yes", "description": "画面中有人正在打架。"}, {"id": "no", "description": "画面中没有人正在打架。"}]},
       {"id": "fall", "question": "画面中是否有人正在摔倒？", "options": [{"id": "yes", "description": "画面中有人正在摔倒。"}, {"id": "no", "description": "画面中没有人正在摔倒。"}]}
