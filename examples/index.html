@@ -49,16 +49,17 @@
   </div>
 
   <label for="state">state（事件）</label>
-  <textarea id="state">Customer cannot access an account after a password reset.</textarea>
+  <textarea id="state">监控画面截图。</textarea>
   <fieldset>
     <legend>image（可选）</legend>
     <input type="file" id="imageFile" accept="image/*">
+    <button id="sampleImage" class="ghost">加载示例图</button>
     <button id="clearImage" class="ghost">清除图像</button>
     <div id="imageInfo" class="muted"></div>
     <img id="imagePreview" alt="" style="display:none;max-width:220px;max-height:160px;margin-top:8px;border-radius:6px;border:1px solid var(--line)">
   </fieldset>
   <label for="question">question（判据）</label>
-  <textarea id="question">Which queue should handle this request?</textarea>
+  <textarea id="question">画面中是否有人？</textarea>
 
   <fieldset>
     <legend>options</legend>
@@ -84,8 +85,8 @@ const BASE = () => document.getElementById("base").value.replace(/\/+$/, "");
 const $ = (id) => document.getElementById(id);
 
 let options = [
-  { id: "access", description: "Account access support." },
-  { id: "billing", description: "Billing support." },
+  { id: "yes", description: "画面中有人。" },
+  { id: "no", description: "画面中没有人。" },
 ];
 
 function renderOptions() {
@@ -219,6 +220,22 @@ $("clearImage").addEventListener("click", () => {
   $("imagePreview").style.display = "none";
   $("imagePreview").removeAttribute("src");
   $("imageInfo").textContent = "";
+});
+$("sampleImage").addEventListener("click", async () => {
+  try {
+    const response = await fetch("20220114100531_6f908.jpg");
+    const blob = await response.blob();
+    const reader = new FileReader();
+    reader.onload = () => {
+      imageData = reader.result;
+      $("imagePreview").src = imageData;
+      $("imagePreview").style.display = "block";
+      $("imageInfo").textContent = "示例图 20220114100531_6f908.jpg";
+    };
+    reader.readAsDataURL(blob);
+  } catch (error) {
+    setStatus("加载示例图失败，请手动上传：" + error.message, false);
+  }
 });
 
 renderOptions();
