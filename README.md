@@ -196,6 +196,8 @@ curl -X POST http://127.0.0.1:8000/decide-batch \
 
 勾选“同时跑完整自回归对比”后，还会调 `/generate`，把生成结果也归一成同一格式，并展示两边的逐判据一致率、耗时与 `tok/s`。可上传图像，或点“加载示例图”用页面内嵌的示例（不依赖外网）。
 
+`examples/replay.html` 是速度对比回放页：并行发起 direct 与 generate，direct 结果立即出现；generate 返回后，按它**真实生成耗时**用打字机把生成内容逐字回放（可选 1×/2×/4×/8× 回放速度，耗时数字始终是真实值），直观展示 direct 相对完整自回归的加速倍数。
+
 ```bash
 python serve.py --fake          # 启动服务
 # 浏览器打开 examples/index.html
