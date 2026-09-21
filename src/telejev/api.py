@@ -48,6 +48,7 @@ def canonical_decision(raw: dict) -> dict:
         "probabilities": {oid: float(p) for oid, p in zip(option_ids, probabilities)},
         "option_logits": {oid: float(v) for oid, v in zip(option_ids, logits)},
         "has_image": bool(raw.get("has_image", False)),
+        "image_tokens": int(raw.get("image_tokens", 0)),
         "input_tokens": int(raw.get("input_tokens", 0)),
         "prompt_version": raw.get("prompt_version"),
         "probability_status": raw.get("probability_status"),
@@ -81,7 +82,7 @@ def load_direct_scorer(model: str, max_tokens: int = 4096):
     def score_fn(row: dict) -> dict:
         return score(loaded_model, tokenizer, row, metadata, max_tokens, processor)
 
-    return score_fn
+    return score_fn, metadata
 
 
 def fake_scorer():
@@ -100,6 +101,7 @@ def fake_scorer():
             "probabilities": [weight / total for weight in weights],
             "option_logits": logits,
             "has_image": bool(row.get("image")),
+            "image_tokens": 0,
             "input_tokens": 42,
             "prompt_version": "fake-v1",
             "probability_status": "fake scorer for interface tests",
@@ -168,7 +170,9 @@ def main() -> None:
     if args.fake:
         service = DecisionService(fake_scorer(), "telejev-fake")
     else:
-        service = DecisionService(load_direct_scorer(args.model, args.max_tokens), args.model)
+        scorer, metadata = load_direct_scorer(args.model, args.max_tokens)
+        print(f"Loaded model: multimodal={metadata['multimodal']}", flush=True)
+        service = DecisionService(scorer, args.model)
 
     httpd = serve(service, args.host, args.port)
     print(f"Serving '{service.model_name}' on http://{args.host}:{args.port}", flush=True)

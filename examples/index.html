@@ -48,9 +48,15 @@
     <span id="status" class="status"></span>
   </div>
 
-  <label for="state">state（证据）</label>
+  <label for="state">state（事件）</label>
   <textarea id="state">Customer cannot access an account after a password reset.</textarea>
-
+  <fieldset>
+    <legend>image（可选）</legend>
+    <input type="file" id="imageFile" accept="image/*">
+    <button id="clearImage" class="ghost">清除图像</button>
+    <div id="imageInfo" class="muted"></div>
+    <img id="imagePreview" alt="" style="display:none;max-width:220px;max-height:160px;margin-top:8px;border-radius:6px;border:1px solid var(--line)">
+  </fieldset>
   <label for="question">question（判据）</label>
   <textarea id="question">Which queue should handle this request?</textarea>
 
@@ -60,13 +66,7 @@
     <button id="addOption" class="ghost">+ 添加选项</button>
   </fieldset>
 
-  <fieldset>
-    <legend>image（可选）</legend>
-    <input type="file" id="imageFile" accept="image/*">
-    <button id="clearImage" class="ghost">清除图像</button>
-    <div id="imageInfo" class="muted"></div>
-    <img id="imagePreview" alt="" style="display:none;max-width:220px;max-height:160px;margin-top:8px;border-radius:6px;border:1px solid var(--line)">
-  </fieldset>
+  
 
   <div class="actions">
     <button id="callDecide" class="primary">调用 /decide</button>

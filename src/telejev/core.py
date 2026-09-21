@@ -116,12 +116,23 @@ def load_causal_model(source: str):
             processor = None
     except (ValueError, OSError):
         processor = None
-    cls = transformers.AutoModelForCausalLM
-    if config.model_type in {"qwen3_5", "qwen3_5_text"}:
+    if processor is not None:
+        # Multimodal checkpoint: load the conditional-generation (vision) class so image
+        # inputs are actually consumed instead of being silently ignored.
+        candidates = {
+            "qwen3_5": "Qwen3_5ForConditionalGeneration",
+            "qwen3_5_moe": "Qwen3_5MoeForConditionalGeneration",
+        }
+        cls = getattr(transformers, candidates.get(config.model_type, ""), None)
+        if cls is None:
+            cls = getattr(transformers, "AutoModelForImageTextToText", transformers.AutoModelForCausalLM)
+    elif config.model_type in {"qwen3_5", "qwen3_5_text"}:
         cls = getattr(transformers, "Qwen3_5ForCausalLM", None)
         if cls is None:
             raise RuntimeError("Installed transformers lacks the native Qwen3.5 model")
         config = config.get_text_config()
+    else:
+        cls = transformers.AutoModelForCausalLM
     model, loading = cls.from_pretrained(
         source,
         config=config,

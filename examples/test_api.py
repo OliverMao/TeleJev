@@ -39,6 +39,7 @@ EXPECTED_KEYS = {
     "probabilities",
     "option_logits",
     "has_image",
+    "image_tokens",
     "input_tokens",
     "prompt_version",
     "probability_status",

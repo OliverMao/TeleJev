@@ -89,6 +89,11 @@ def score(model, tokenizer, row: dict, metadata: dict, max_tokens: int = 4096, p
     started = time.perf_counter()
     image = load_image(row["image"]) if row.get("image") else None
     ids, slots, prompt_hash, extras = encode_prompt(tokenizer, row, max_tokens, processor, image)
+    image_tokens = 0
+    if image is not None:
+        pad_id = tokenizer.convert_tokens_to_ids("<|image_pad|>")
+        if isinstance(pad_id, int) and pad_id >= 0:
+            image_tokens = ids.count(pad_id)
     device = next(model.parameters()).device
     if extras is not None:
         inputs = {key: (value.to(device) if hasattr(value, "to") else value) for key, value in extras.items()}
@@ -111,6 +116,7 @@ def score(model, tokenizer, row: dict, metadata: dict, max_tokens: int = 4096, p
         "probabilities": softmax(selected),
         "option_logits": selected,
         "has_image": image is not None,
+        "image_tokens": image_tokens,
         "input_tokens": len(ids),
         "forward_seconds": time.perf_counter() - forward_start,
         "total_seconds": time.perf_counter() - started,

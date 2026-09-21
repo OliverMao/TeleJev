@@ -102,6 +102,7 @@ curl -X POST http://127.0.0.1:8000/decide \
   "probabilities": {"access": 0.87, "billing": 0.13},
   "option_logits": {"access": 12.3, "billing": 10.1},
   "has_image": false,
+  "image_tokens": 0,
   "input_tokens": 128,
   "prompt_version": "direct-options-v1",
   "probability_status": "conditional option score; uncalibrated as decision confidence"
@@ -132,7 +133,7 @@ curl -X POST http://127.0.0.1:8000/decide \
   }'
 ```
 
-图像只有在 `--model` 暴露多模态 processor 时才会真正送入模型；纯文本模型会直接报错。`--mode direct` 支持图像，`serial` / `shared` 不支持。返回的 `has_image` 字段标明本次是否使用了图像。
+图像只有在 `--model` 暴露多模态 processor 时才会真正送入模型（启动时会打印 `multimodal=True/False`）；纯文本模型会直接报错。`--mode direct` 支持图像，`serial` / `shared` 不支持。返回的 `has_image` 标明本次是否使用了图像，`image_tokens` 是实际喂给视觉塔的图像 token 数（为 0 说明视觉没有生效）。
 
 ### 前端测试页
 
