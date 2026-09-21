@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TeleJev 接口测试</title>
+<style>
+  :root { color-scheme: light dark; --line: #d0d7de; --accent: #2563eb; --ok: #16a34a; --bad: #dc2626; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px; font: 15px/1.5 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; max-width: 960px; margin-inline: auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #666; margin: 0 0 20px; font-size: 13px; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin: 0 0 16px; }
+  legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 10px 0 4px; }
+  textarea, input[type="text"] { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font: inherit; background: transparent; color: inherit; }
+  textarea { resize: vertical; min-height: 64px; }
+  .server { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+  .server input { flex: 1 1 260px; }
+  .opt { display: grid; grid-template-columns: 140px 1fr auto; gap: 8px; margin-bottom: 8px; align-items: center; }
+  button { padding: 7px 14px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.ghost { padding: 4px 10px; font-size: 13px; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; }
+  .status { font-size: 13px; }
+  .status.ok { color: var(--ok); }
+  .status.bad { color: var(--bad); }
+  #result { display: none; }
+  .chosen { font-size: 22px; font-weight: 700; margin-bottom: 12px; }
+  .chosen small { font-weight: 400; color: #666; font-size: 13px; }
+  .bar-row { display: grid; grid-template-columns: 120px 1fr 64px; gap: 10px; align-items: center; margin-bottom: 6px; font-size: 13px; }
+  .bar { height: 16px; background: #0001; border-radius: 8px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .bar-row.best .bar > i { background: var(--ok); }
+  pre { background: #0000000d; border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow: auto; font-size: 12.5px; }
+  .error { color: var(--bad); white-space: pre-wrap; }
+  .muted { color: #666; font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>TeleJev 决策接口测试</h1>
+  <p class="sub">先启动服务：<code>python serve.py --fake</code>（无 GPU 联调）或 <code>python serve.py --model Qwen/Qwen3.5-4B</code></p>
+
+  <div class="server">
+    <label style="margin:0" for="base">服务地址</label>
+    <input id="base" type="text" value="http://127.0.0.1:8000">
+    <button id="health" class="ghost">检查 /health</button>
+    <span id="status" class="status"></span>
+  </div>
+
+  <label for="state">state（证据）</label>
+  <textarea id="state">Customer cannot access an account after a password reset.</textarea>
+
+  <label for="question">question（判据）</label>
+  <textarea id="question">Which queue should handle this request?</textarea>
+
+  <fieldset>
+    <legend>options</legend>
+    <div id="options"></div>
+    <button id="addOption" class="ghost">+ 添加选项</button>
+  </fieldset>
+
+  <div class="actions">
+    <button id="callDecide" class="primary">调用 /decide</button>
+    <button id="callOpenAI">调用 /v1/chat/completions</button>
+  </div>
+
+  <section id="result">
+    <div id="chosen" class="chosen"></div>
+    <div id="bars"></div>
+    <h3 id="rawTitle" style="font-size:13px;margin:18px 0 6px">原始响应</h3>
+    <pre id="raw"></pre>
+  </section>
+
+<script>
+const BASE = () => document.getElementById("base").value.replace(/\/+$/, "");
+const $ = (id) => document.getElementById(id);
+
+let options = [
+  { id: "access", description: "Account access support." },
+  { id: "billing", description: "Billing support." },
+];
+
+function renderOptions() {
+  const box = $("options");
+  box.innerHTML = "";
+  options.forEach((option, index) => {
+    const row = document.createElement("div");
+    row.className = "opt";
+    row.innerHTML = `
+      <input type="text" value="${escapeAttr(option.id)}" placeholder="id" data-field="id" data-index="${index}">
+      <input type="text" value="${escapeAttr(option.description)}" placeholder="description" data-field="description" data-index="${index}">
+      <button class="ghost" data-remove="${index}" title="删除">✕</button>`;
+    box.appendChild(row);
+  });
+}
+
+function escapeAttr(value) {
+  return String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+$("options").addEventListener("input", (event) => {
+  const target = event.target;
+  if (target.dataset.field) options[Number(target.dataset.index)][target.dataset.field] = target.value;
+});
+$("options").addEventListener("click", (event) => {
+  const index = event.target.dataset.remove;
+  if (index === undefined) return;
+  if (options.length <= 2) { setStatus("至少保留 2 个选项", false); return; }
+  options.splice(Number(index), 1);
+  renderOptions();
+});
+$("addOption").addEventListener("click", () => {
+  options.push({ id: "option" + (options.length + 1), description: "" });
+  renderOptions();
+});
+
+function collectRow() {
+  return {
+    id: "demo-" + Date.now(),
+    state: $("state").value,
+    question: $("question").value,
+    options: options.map((option) => ({ id: option.id, description: option.description })),
+  };
+}
+
+function setStatus(text, ok) {
+  const node = $("status");
+  node.textContent = text;
+  node.className = "status " + (ok ? "ok" : "bad");
+}
+
+async function callApi(path, body) {
+  const response = await fetch(BASE() + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error?.message || ("HTTP " + response.status));
+  return payload;
+}
+
+async function run(kind) {
+  $("result").style.display = "none";
+  setStatus("请求中…");
+  try {
+    const row = collectRow();
+    let decision, raw;
+    if (kind === "decide") {
+      decision = await callApi("/decide", row);
+      raw = decision;
+    } else {
+      const payload = { state: row.state, question: row.question, options: row.options };
+      const completion = await callApi("/v1/chat/completions", {
+        model: "telejev",
+        messages: [{ role: "user", content: JSON.stringify(payload) }],
+      });
+      decision = JSON.parse(completion.choices[0].message.content);
+      raw = completion;
+    }
+    renderResult(decision, raw);
+    setStatus("成功", true);
+  } catch (error) {
+    setStatus("失败：" + error.message, false);
+    $("result").style.display = "block";
+    $("chosen").textContent = "调用失败";
+    $("bars").innerHTML = "";
+    $("raw").textContent = error.message;
+    $("rawTitle").textContent = "错误";
+  }
+}
+
+function renderResult(decision, raw) {
+  $("result").style.display = "block";
+  $("rawTitle").textContent = "原始响应";
+  $("chosen").innerHTML = `选中：${escapeAttr(decision.option_id)}（${escapeAttr(decision.letter)}） <small>input_tokens=${decision.input_tokens ?? "?"}</small>`;
+
+  const entries = Object.entries(decision.probabilities || {});
+  const bars = $("bars");
+  bars.innerHTML = "";
+  for (const [id, probability] of entries) {
+    const best = id === decision.option_id;
+    const row = document.createElement("div");
+    row.className = "bar-row" + (best ? " best" : "");
+    row.innerHTML = `
+      <span>${best ? "★ " : ""}${escapeAttr(id)}</span>
+      <span class="bar"><i style="width:${(probability * 100).toFixed(1)}%"></i></span>
+      <span>${(probability * 100).toFixed(2)}%</span>`;
+    bars.appendChild(row);
+  }
+  $("raw").textContent = JSON.stringify(raw, null, 2);
+}
+
+$("health").addEventListener("click", async () => {
+  setStatus("检查中…");
+  try {
+    const response = await fetch(BASE() + "/health");
+    const body = await response.json();
+    setStatus("服务正常：" + JSON.stringify(body), response.ok);
+  } catch (error) {
+    setStatus("无法连接：" + error.message, false);
+  }
+});
+$("callDecide").addEventListener("click", () => run("decide"));
+$("callOpenAI").addEventListener("click", () => run("openai"));
+
+renderOptions();
+</script>
+</body>
+</html>
