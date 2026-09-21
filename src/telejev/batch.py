@@ -43,14 +43,29 @@ def _prefix_text(apply, state: str, has_image: bool) -> str:
 
 
 def _image_prefix(processor, state: str, image):
-    """Return (prefix_ids, prefix_extras) for an image+state prefix."""
+    """Return (prefix_ids, prefix_extras) for an image+state prefix.
+
+    The final boundary token is dropped so the suffix can be split cleanly, and
+    every per-token tensor the processor returns (``input_ids``,
+    ``attention_mask``, ``mm_token_type_ids``/``token_type_ids``, ...) is
+    truncated by the same amount, keeping all sequence lengths aligned.
+    """
     text = _prefix_text(processor.apply_chat_template, state, True)
     extras = processor(text=[text], images=[image], return_tensors="pt", padding=True)
-    ids = extras["input_ids"][0].tolist()
-    if not ids:
+    full = extras["input_ids"].shape[-1]
+    keep = full - 1
+    if keep <= 0:
         raise ValueError("Empty image prefix")
-    # Drop the final boundary token so the suffix can be split cleanly.
-    return ids[:-1], extras
+    sliced = {}
+    for key, value in extras.items():
+        is_per_token = (
+            hasattr(value, "shape")
+            and hasattr(value, "dim")
+            and value.dim() >= 2
+            and value.shape[-1] == full
+        )
+        sliced[key] = value[..., :keep] if is_per_token else value
+    return sliced["input_ids"][0].tolist(), sliced
 
 
 def _repeat_cache(cache, count: int, device) -> None:
