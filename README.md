@@ -194,6 +194,21 @@ python serve.py --fake          # 启动服务
 # 浏览器打开 examples/index.html
 ```
 
+### 自回归对比
+
+`examples/compare_generation.py` 用 `model.generate`（贪心，内部逐 token，**无手写解码循环**）对同一张图、同一组判据做完整自回归生成，并与 direct 的共享前缀批量（图像 prefill 1 次 + 判据前向 1 次）对比耗时与答案一致率。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples/compare_generation.py \
+  --model Qwen/Qwen3.5-4B \
+  --image examples/fall.png
+```
+
+输出每个任务的 direct / generate 判定与是否一致，以及两边耗时：
+
+- direct：`prefill_seconds`、`suffix_seconds`、`inference_seconds`（2 次前向）
+- generate：`prompt_tokens`、`new_tokens`、`generate_seconds`、tok/s、`total_seconds`
+
 ### 在应用中调用
 
 ```python
