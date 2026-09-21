@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TeleJev 接口测试</title>
+<title>TeleJev 多任务判定测试</title>
 <style>
-  :root { color-scheme: light dark; --line: #d0d7de; --accent: #2563eb; --ok: #16a34a; --bad: #dc2626; }
+  :root { color-scheme: light dark; --line: #d0d7de; --accent: #2563eb; --ok: #16a34a; --bad: #dc2626; --warn: #d97706; }
   * { box-sizing: border-box; }
   body { margin: 0; padding: 24px; font: 15px/1.5 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; max-width: 960px; margin-inline: auto; }
   h1 { font-size: 20px; margin: 0 0 4px; }
@@ -14,33 +14,40 @@
   legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
   label { display: block; font-size: 13px; font-weight: 600; margin: 10px 0 4px; }
   textarea, input[type="text"] { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font: inherit; background: transparent; color: inherit; }
-  textarea { resize: vertical; min-height: 64px; }
+  textarea { resize: vertical; min-height: 56px; }
   .server { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
   .server input { flex: 1 1 260px; }
-  .opt { display: grid; grid-template-columns: 140px 1fr auto; gap: 8px; margin-bottom: 8px; align-items: center; }
   button { padding: 7px 14px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
   button:hover { border-color: var(--accent); }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button.ghost { padding: 4px 10px; font-size: 13px; }
-  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; align-items: center; }
   .status { font-size: 13px; }
   .status.ok { color: var(--ok); }
   .status.bad { color: var(--bad); }
-  #result { display: none; }
-  .chosen { font-size: 22px; font-weight: 700; margin-bottom: 12px; }
-  .chosen small { font-weight: 400; color: #666; font-size: 13px; }
-  .bar-row { display: grid; grid-template-columns: 120px 1fr 64px; gap: 10px; align-items: center; margin-bottom: 6px; font-size: 13px; }
-  .bar { height: 16px; background: #0001; border-radius: 8px; overflow: hidden; }
+  .tasks { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+  .tasks label { display: flex; gap: 8px; align-items: center; margin: 0; font-weight: 400; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+  .tasks input { margin: 0; }
+  #results { display: none; }
+  .task-result { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+  .task-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .task-name { font-weight: 700; }
+  .verdict { font-weight: 700; }
+  .verdict.yes { color: var(--bad); }
+  .verdict.no { color: var(--ok); }
+  .meta { color: #666; font-size: 12px; margin-top: 4px; }
+  .bar-row { display: grid; grid-template-columns: 72px 1fr 72px; gap: 10px; align-items: center; margin-top: 8px; font-size: 13px; }
+  .bar { height: 14px; background: #0001; border-radius: 7px; overflow: hidden; }
   .bar > i { display: block; height: 100%; background: var(--accent); }
   .bar-row.best .bar > i { background: var(--ok); }
   pre { background: #0000000d; border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow: auto; font-size: 12.5px; }
-  .error { color: var(--bad); white-space: pre-wrap; }
   .muted { color: #666; font-size: 12px; }
 </style>
 </head>
 <body>
-  <h1>TeleJev 决策接口测试</h1>
-  <p class="sub">先启动服务：<code>python serve.py --fake</code>（无 GPU 联调）或 <code>python serve.py --model Qwen/Qwen3.5-4B</code></p>
+  <h1>TeleJev 多任务判定测试</h1>
+  <p class="sub">同一张画面，分别判定：打架 / 摔倒 / 挥手 / 捂胸口。先启动服务：<code>python serve.py --model Qwen/Qwen3.5-4B</code> 或 <code>python serve.py --fake</code></p>
+
   <div class="server">
     <label style="margin:0" for="base">服务地址</label>
     <input id="base" type="text" value="http://127.0.0.1:22001">
@@ -48,89 +55,71 @@
     <span id="status" class="status"></span>
   </div>
 
-  <label for="state">state（事件）</label>
-  <textarea id="state">监控画面截图。</textarea>
   <fieldset>
-    <legend>image（可选）</legend>
+    <legend>画面（image）</legend>
     <input type="file" id="imageFile" accept="image/*">
     <button id="sampleImage" class="ghost">加载示例图</button>
     <button id="clearImage" class="ghost">清除图像</button>
     <div id="imageInfo" class="muted"></div>
-    <img id="imagePreview" alt="" style="display:none;max-width:220px;max-height:160px;margin-top:8px;border-radius:6px;border:1px solid var(--line)">
+    <img id="imagePreview" alt="" style="display:none;max-width:260px;max-height:200px;margin-top:8px;border-radius:6px;border:1px solid var(--line)">
   </fieldset>
-  <label for="question">question（判据）</label>
-  <textarea id="question">画面中是否有人？</textarea>
 
   <fieldset>
-    <legend>options</legend>
-    <div id="options"></div>
-    <button id="addOption" class="ghost">+ 添加选项</button>
+    <legend>任务</legend>
+    <div class="tasks" id="tasks"></div>
+    <button id="toggleAll" class="ghost" style="margin-top:10px">全选 / 全不选</button>
   </fieldset>
 
-  
-
   <div class="actions">
-    <button id="callDecide" class="primary">调用 /decide</button>
+    <button id="run" class="primary">开始判定</button>
+    <span class="muted">提示：单卡服务会串行处理这些请求。</span>
   </div>
 
-  <section id="result">
-    <div id="chosen" class="chosen"></div>
-    <div id="bars"></div>
-    <h3 id="rawTitle" style="font-size:13px;margin:18px 0 6px">原始响应</h3>
+  <section id="results">
+    <div id="cards"></div>
+    <h3 style="font-size:13px;margin:18px 0 6px">原始响应</h3>
     <pre id="raw"></pre>
   </section>
 
 <script>
 const BASE = () => document.getElementById("base").value.replace(/\/+$/, "");
 const $ = (id) => document.getElementById(id);
-
 const SAMPLE_IMAGE = "https://ossv2.yoobit.cn/nife/demo.png";
+const STATE = "监控画面截图。";
 
-let options = [
-  { id: "yes", description: "画面中有人。" },
-  { id: "no", description: "画面中没有人。" },
+const TASKS = [
+  { key: "fight", label: "打架", verb: "正在打架" },
+  { key: "fall", label: "摔倒", verb: "正在摔倒或已经摔倒" },
+  { key: "wave", label: "挥手", verb: "正在挥手" },
+  { key: "chest", label: "捂胸口", verb: "正在捂胸口" },
 ];
 
-function renderOptions() {
-  const box = $("options");
+let imageData = null;
+
+function renderTasks() {
+  const box = $("tasks");
   box.innerHTML = "";
-  options.forEach((option, index) => {
-    const row = document.createElement("div");
-    row.className = "opt";
-    row.innerHTML = `
-      <input type="text" value="${escapeAttr(option.id)}" placeholder="id" data-field="id" data-index="${index}">
-      <input type="text" value="${escapeAttr(option.description)}" placeholder="description" data-field="description" data-index="${index}">
-      <button class="ghost" data-remove="${index}" title="删除">✕</button>`;
-    box.appendChild(row);
+  TASKS.forEach((task) => {
+    const label = document.createElement("label");
+    label.innerHTML = `<input type="checkbox" data-key="${task.key}" checked> ${task.label}`;
+    box.appendChild(label);
   });
 }
-
-function escapeAttr(value) {
-  return String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+function selectedTasks() {
+  return TASKS.filter((task) => {
+    const box = document.querySelector(`input[data-key="${task.key}"]`);
+    return box && box.checked;
+  });
 }
-
-$("options").addEventListener("input", (event) => {
-  const target = event.target;
-  if (target.dataset.field) options[Number(target.dataset.index)][target.dataset.field] = target.value;
-});
-$("options").addEventListener("click", (event) => {
-  const index = event.target.dataset.remove;
-  if (index === undefined) return;
-  if (options.length <= 2) { setStatus("至少保留 2 个选项", false); return; }
-  options.splice(Number(index), 1);
-  renderOptions();
-});
-$("addOption").addEventListener("click", () => {
-  options.push({ id: "option" + (options.length + 1), description: "" });
-  renderOptions();
-});
-
-function collectRow() {
+function buildRow(task) {
   const row = {
-    id: "demo-" + Date.now(),
-    state: $("state").value,
-    question: $("question").value,
-    options: options.map((option) => ({ id: option.id, description: option.description })),
+    id: `demo-${task.key}-${Date.now()}`,
+    state: STATE,
+    question: `画面中是否有人${task.verb}？`,
+    options: [
+      { id: "yes", description: `画面中有人${task.verb}。` },
+      { id: "no", description: `画面中没有人${task.verb}。` },
+    ],
   };
   if (imageData) row.image = imageData;
   return row;
@@ -139,56 +128,75 @@ function collectRow() {
 function setStatus(text, ok) {
   const node = $("status");
   node.textContent = text;
-  node.className = "status " + (ok ? "ok" : "bad");
+  node.className = "status " + (ok ? "ok" : ok === false ? "bad" : "");
 }
 
-async function callApi(path, body) {
-  const response = await fetch(BASE() + path, {
+async function callDecide(row) {
+  const response = await fetch(BASE() + "/decide", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify(row),
   });
   const payload = await response.json();
   if (!response.ok) throw new Error(payload?.error?.message || ("HTTP " + response.status));
   return payload;
 }
 
-async function run() {
-  $("result").style.display = "none";
-  setStatus("请求中…");
-  try {
-    const decision = await callApi("/decide", collectRow());
-    renderResult(decision, decision);
-    setStatus("成功", true);
-  } catch (error) {
-    setStatus("失败：" + error.message, false);
-    $("result").style.display = "block";
-    $("chosen").textContent = "调用失败";
-    $("bars").innerHTML = "";
-    $("raw").textContent = error.message;
-    $("rawTitle").textContent = "错误";
-  }
+function escapeAttr(value) {
+  return String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
 
-function renderResult(decision, raw) {
-  $("result").style.display = "block";
-  $("rawTitle").textContent = "原始响应";
-  $("chosen").innerHTML = `选中：${escapeAttr(decision.option_id)}（${escapeAttr(decision.letter)}） <small>input_tokens=${decision.input_tokens ?? "?"} · image=${decision.has_image ? "是" : "否"}</small>`;
+function renderCard(task, decision) {
+  const yes = decision.probabilities?.yes ?? (decision.option_id === "yes" ? 1 : 0);
+  const isYes = decision.option_id === "yes";
+  const card = document.createElement("div");
+  card.className = "task-result";
+  const bars = Object.entries(decision.probabilities || {})
+    .map(([id, probability]) => {
+      const best = id === decision.option_id;
+      return `<div class="bar-row${best ? " best" : ""}">
+        <span>${id === "yes" ? "有" : "无"}</span>
+        <span class="bar"><i style="width:${(probability * 100).toFixed(1)}%"></i></span>
+        <span>${(probability * 100).toFixed(1)}%</span>
+      </div>`;
+    })
+    .join("");
+  card.innerHTML = `
+    <div class="task-head">
+      <span class="task-name">${task.label}</span>
+      <span class="verdict ${isYes ? "yes" : "no"}">${isYes ? "有" : "无"}（${(Number(yes) * 100).toFixed(1)}%）</span>
+    </div>
+    <div class="meta">${escapeAttr(decision.option_id)} · input_tokens=${decision.input_tokens ?? "?"} · image=${decision.has_image ? "是" : "否"} · image_tokens=${decision.image_tokens ?? "?"}</div>
+    ${bars}`;
+  return card;
+}
 
-  const entries = Object.entries(decision.probabilities || {});
-  const bars = $("bars");
-  bars.innerHTML = "";
-  for (const [id, probability] of entries) {
-    const best = id === decision.option_id;
-    const row = document.createElement("div");
-    row.className = "bar-row" + (best ? " best" : "");
-    row.innerHTML = `
-      <span>${best ? "★ " : ""}${escapeAttr(id)}</span>
-      <span class="bar"><i style="width:${(probability * 100).toFixed(1)}%"></i></span>
-      <span>${(probability * 100).toFixed(2)}%</span>`;
-    bars.appendChild(row);
+async function runAll() {
+  const tasks = selectedTasks();
+  if (!tasks.length) { setStatus("请至少勾选一个任务", false); return; }
+  $("results").style.display = "block";
+  $("cards").innerHTML = "";
+  $("raw").textContent = "";
+  setStatus("判定中…");
+
+  const responses = [];
+  let failures = 0;
+  for (const task of tasks) {
+    try {
+      const decision = await callDecide(buildRow(task));
+      $("cards").appendChild(renderCard(task, decision));
+      responses.push({ task: task.key, request: buildRow(task), response: decision });
+    } catch (error) {
+      failures += 1;
+      const card = document.createElement("div");
+      card.className = "task-result";
+      card.innerHTML = `<div class="task-head"><span class="task-name">${task.label}</span><span class="verdict yes">失败</span></div><div class="meta">${escapeAttr(error.message)}</div>`;
+      $("cards").appendChild(card);
+      responses.push({ task: task.key, error: error.message });
+    }
   }
-  $("raw").textContent = JSON.stringify(raw, null, 2);
+  $("raw").textContent = JSON.stringify(responses, null, 2);
+  setStatus(failures ? `${tasks.length - failures}/${tasks.length} 成功` : "全部完成", failures === 0);
 }
 
 $("health").addEventListener("click", async () => {
@@ -201,9 +209,7 @@ $("health").addEventListener("click", async () => {
     setStatus("无法连接：" + error.message, false);
   }
 });
-$("callDecide").addEventListener("click", run);
 
-let imageData = null;
 $("imageFile").addEventListener("change", (event) => {
   const file = event.target.files[0];
   if (!file) return;
@@ -229,8 +235,14 @@ $("sampleImage").addEventListener("click", () => {
   $("imagePreview").style.display = "block";
   $("imageInfo").textContent = "示例图 demo.png（OSS）";
 });
+$("toggleAll").addEventListener("click", () => {
+  const boxes = document.querySelectorAll('#tasks input[type="checkbox"]');
+  const target = !Array.from(boxes).every((box) => box.checked);
+  boxes.forEach((box) => { box.checked = target; });
+});
+$("run").addEventListener("click", runAll);
 
-renderOptions();
+renderTasks();
 </script>
 </body>
 </html>

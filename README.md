@@ -137,7 +137,7 @@ curl -X POST http://127.0.0.1:8000/decide \
 
 ### 前端测试页
 
-`examples/index.html` 是单文件测试页：可编辑 state / question / options，上传图像，直接调用 `/decide` 并用条形图展示概率。
+`examples/index.html` 是单文件多任务测试页：勾选 打架 / 摔倒 / 挥手 / 捂胸口，对同一张画面分别调用 `/decide`，汇总每个任务的“有/无”判定与概率。可上传图像或用内置 OSS 示例图。
 
 ```bash
 python serve.py --fake          # 启动服务
