@@ -70,6 +70,31 @@ CUDA_VISIBLE_DEVICES=0 python serve.py --model Qwen/Qwen3.5-4B
 python serve.py --fake
 ```
 
+### SGLang 后端
+
+把推理放到运行中的 SGLang 服务上，Jev 式读 logits 与生成都走 SGLang，享受融合 kernel / CUDA Graph / Radix Cache：
+
+```bash
+# 1) 先起 SGLang（示例）
+python -m sglang.launch_server --model-path /path/to/model --port 30000
+
+# 2) 用 SGLang 后端提供 TeleJev 接口
+python serve.py --backend sglang \
+  --sglang-url http://127.0.0.1:30000 \
+  --sglang-model Qwen/Qwen3.5-4B
+```
+
+- **Jev 式读取**：`max_tokens=1` + `logprobs`，只对选项字母归一化（prefill-only，不生成）
+- **生成**：同一 SGLang 服务的普通 `max_tokens` 路径
+- **多判据**：逐条请求，靠 SGLang 的 Radix Cache 复用图像/state 共享前缀
+
+直接对比两者：
+
+```bash
+python examples/sglang_compare.py \
+  --base-url http://127.0.0.1:30000 --model Qwen/Qwen3.5-4B --image examples/fall.png
+```
+
 默认监听 `http://127.0.0.1:8000`，可用 `--host` / `--port` 修改。
 
 | 方法 | 路径 | 说明 |

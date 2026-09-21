@@ -12,6 +12,8 @@ No model weights or third-party raw evaluation records are distributed here.
 | Vue | https://github.com/vuejs/core | `3.5.21` | Browser demo UI runtime; MIT. |
 | Material Symbols | https://fonts.google.com/icons | Google Fonts CDN | Browser demo icons; Apache-2.0. |
 | Star History | https://www.star-history.com/ | Live SVG endpoint | README star-history chart; service and generated chart remain external. |
+| SGLang | https://github.com/sgl-project/sglang | — | Optional inference backend used via its HTTP API; not redistributed. |
+| LLM2Jev | https://github.com/Yinsongxu/LLM2Jev | — | Reference design for SGLang prefill-only scoring with `label_token_ids` and shared-prefix staging. |
 | Qwen3-0.6B GGUF | https://huggingface.co/Qwen/Qwen3-0.6B-GGUF | `23749fefcc72300e3a2ad315e1317431b06b590a` | External Q8_0 browser model; weights are not redistributed. |
 | MiniCPM5-2B GGUF | https://huggingface.co/openbmb/MiniCPM5-2B-GGUF | `2079a22f3beaa4e306449978533478fe0522f4b3` | External Q4_K_M browser model; Apache-2.0 on its model card; weights are not redistributed. |
 | Qwen3.5-4B GGUF | https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF | `4168f45a16a1290d65a4ec0fa312ae917a4c15d6` | External Q4_K_M browser model; weights are not redistributed. |
