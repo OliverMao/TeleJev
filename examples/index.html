@@ -182,6 +182,50 @@ function renderTiming(timing) {
   });
 }
 
+async function postJson(path, body) {
+  const response = await fetch(BASE() + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch (error) { data = null; }
+  return { response, data, text };
+}
+
+function buildRow(task) {
+  const criterion = buildCriterion(task);
+  const row = { id: `${task.key}-${Date.now()}`, state: STATE, question: criterion.question, options: criterion.options };
+  if (imageData) row.image = imageData;
+  return row;
+}
+
+async function runBatch(tasks, body) {
+  const { response, data, text } = await postJson("/decide-batch", body);
+  if (response.status === 404) return null; // server predates /decide-batch
+  if (!response.ok) throw new Error(`HTTP ${response.status} ${data?.error?.message || text.slice(0, 300)}`);
+  data.results.forEach((decision, index) => $("cards").appendChild(renderCard(tasks[index], decision)));
+  renderTiming(data.timing || {});
+  $("raw").textContent = JSON.stringify(data, null, 2);
+  return data;
+}
+
+async function runPerTask(tasks) {
+  const responses = [];
+  let total = 0;
+  for (const task of tasks) {
+    const { response, data, text } = await postJson("/decide", buildRow(task));
+    if (!response.ok) throw new Error(`HTTP ${response.status} ${data?.error?.message || text.slice(0, 300)}`);
+    $("cards").appendChild(renderCard(task, data));
+    total += data.total_seconds || 0;
+    responses.push({ task: task.key, response: data });
+  }
+  renderTiming({ total_seconds: total, batch_size: tasks.length, fallback: true });
+  $("raw").textContent = JSON.stringify({ results: responses }, null, 2);
+  return responses;
+}
+
 async function runAll() {
   const tasks = selectedTasks();
   if (!tasks.length) { setStatus("请至少勾选一个任务", false); return; }
@@ -191,27 +235,14 @@ async function runAll() {
   $("raw").textContent = "";
   setStatus("判定中…");
 
-  const body = {
-    state: STATE,
-    criteria: tasks.map(buildCriterion),
-  };
+  const body = { state: STATE, criteria: tasks.map(buildCriterion) };
   if (imageData) body.image = imageData;
 
   try {
-    const response = await fetch(BASE() + "/decide-batch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data?.error?.message || ("HTTP " + response.status));
-
-    data.results.forEach((decision, index) => {
-      $("cards").appendChild(renderCard(tasks[index], decision));
-    });
-    renderTiming(data.timing || {});
-    $("raw").textContent = JSON.stringify(data, null, 2);
-    setStatus("完成", true);
+    const batched = await runBatch(tasks, body);
+    if (batched) { setStatus("完成（/decide-batch）", true); return; }
+    setStatus("服务端无 /decide-batch（404），已回退逐任务 /decide；请更新并重启服务端", false);
+    await runPerTask(tasks);
   } catch (error) {
     setStatus("失败：" + error.message, false);
     const card = document.createElement("div");
@@ -266,6 +297,7 @@ $("toggleAll").addEventListener("click", () => {
 $("run").addEventListener("click", runAll);
 
 renderTasks();
+window.addEventListener("load", () => $("health").click());
 </script>
 </body>
 </html>
