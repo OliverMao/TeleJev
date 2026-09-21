@@ -11,8 +11,9 @@ or without a GPU::
 
 Then run this client::
 
-    python examples/api_client.py                  # text-only decision
-    python examples/api_client.py path/to/shot.png # decision with an image
+    python examples/api_client.py                  # single text decision
+    python examples/api_client.py shot.png         # single decision with an image
+    python examples/api_client.py shot.png --batch # one image, four criteria
 """
 
 import base64
@@ -22,6 +23,13 @@ import urllib.request
 from pathlib import Path
 
 BASE = "http://127.0.0.1:8000"
+
+TASKS = [
+    ("fight", "打架", "正在打架"),
+    ("fall", "摔倒", "正在摔倒或已经摔倒"),
+    ("wave", "挥手", "正在挥手"),
+    ("chest", "捂胸口", "正在捂胸口"),
+]
 
 ROW = {
     "id": "route-1",
@@ -45,17 +53,43 @@ def post(path: str, body: dict) -> dict:
         return json.loads(response.read())
 
 
-def with_image(row: dict, path: str) -> dict:
+def data_uri(path: str) -> str:
     payload = base64.b64encode(Path(path).read_bytes()).decode("ascii")
     suffix = (Path(path).suffix.lstrip(".") or "png").lower()
-    return {**row, "image": f"data:image/{suffix};base64,{payload}"}
+    return f"data:image/{suffix};base64,{payload}"
+
+
+def batch_body(image: str) -> dict:
+    return {
+        "state": "监控画面截图。",
+        "image": image,
+        "criteria": [
+            {
+                "id": key,
+                "question": f"画面中是否有人{verb}？",
+                "options": [
+                    {"id": "yes", "description": f"画面中有人{verb}。"},
+                    {"id": "no", "description": f"画面中没有人{verb}。"},
+                ],
+            }
+            for key, _, verb in TASKS
+        ],
+    }
 
 
 def main() -> None:
-    print("decision:", json.dumps(post("/decide", ROW), ensure_ascii=False))
-    if len(sys.argv) > 1:
-        result = post("/decide", with_image(ROW, sys.argv[1]))
-        print("decision+image:", json.dumps(result, ensure_ascii=False))
+    image = sys.argv[1] if len(sys.argv) > 1 else None
+    if image and "--batch" in sys.argv:
+        result = post("/decide-batch", batch_body(data_uri(image)))
+        for item in result["results"]:
+            print(f"{item['id']}: {item['option_id']} ({item['total_seconds']:.4f}s)")
+        print("timing:", json.dumps(result["timing"], ensure_ascii=False))
+        return
+
+    row = dict(ROW)
+    if image:
+        row["image"] = data_uri(image)
+    print("decision:", json.dumps(post("/decide", row), ensure_ascii=False))
 
 
 if __name__ == "__main__":

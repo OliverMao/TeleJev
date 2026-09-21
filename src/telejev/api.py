@@ -13,8 +13,9 @@ Run the interface without a GPU (deterministic stub scorer)::
 
 Endpoints
 ---------
-GET  /health   liveness probe
-POST /decide   body = {"state","question","options","image"?} -> fixed decision object
+GET  /health        liveness probe
+POST /decide        one decision row -> fixed decision object
+POST /decide-batch  one state/image + many criteria, sharing one image prefill
 
 ``image`` is optional and may be a base64 ``data:`` URI, an ``http(s)`` URL, or a
 local file path. It is only used when the loaded model exposes a multimodal
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .core import LETTERS, validate_row
@@ -42,7 +44,7 @@ def canonical_decision(raw: dict) -> dict:
     if not option_ids:
         raise ValueError("Scorer returned no options")
     best = max(range(len(probabilities)), key=probabilities.__getitem__)
-    return {
+    decision = {
         "option_id": option_ids[best],
         "letter": LETTERS[best],
         "probabilities": {oid: float(p) for oid, p in zip(option_ids, probabilities)},
@@ -53,27 +55,43 @@ def canonical_decision(raw: dict) -> dict:
         "prompt_version": raw.get("prompt_version"),
         "probability_status": raw.get("probability_status"),
     }
+    for key in ("prefill_seconds", "suffix_seconds", "forward_seconds", "total_seconds"):
+        if key in raw:
+            decision[key] = float(raw[key])
+    return decision
 
 
 class DecisionService:
-    """Thread-safe wrapper around a `score(row) -> raw result` callable."""
+    """Thread-safe wrapper around single-row and batch scorers."""
 
-    def __init__(self, score_fn, model_name: str):
+    def __init__(self, score_fn, model_name: str, batch_fn=None):
         self._score = score_fn
+        self._batch = batch_fn
         self.model_name = model_name
         self._lock = threading.Lock()
 
-    def decide(self, row: dict) -> dict:
-        row = {key: row[key] for key in ROW_KEYS if key in row}
+    def decide(self, body: dict) -> dict:
+        row = {key: body[key] for key in ROW_KEYS if key in body}
         row.setdefault("id", "request")
         validate_row(row)
         with self._lock:
             raw = self._score(row)
         return canonical_decision(raw)
 
+    def decide_batch(self, body: dict) -> dict:
+        if self._batch is None:
+            raise ValueError("Batch scoring is not available on this server")
+        state = body.get("state")
+        image = body.get("image")
+        criteria = body.get("criteria")
+        with self._lock:
+            results, timing = self._batch(state, image, criteria)
+        return {"results": [canonical_decision(result) for result in results], "timing": timing}
 
-def load_direct_scorer(model: str, max_tokens: int = 4096):
-    """Load one CUDA model and return a bound direct-mode scorer."""
+
+def load_model_scorers(model: str, max_tokens: int = 4096):
+    """Load one CUDA model and return (single scorer, batch scorer, metadata)."""
+    from .batch import score_batch
     from .core import load_causal_model
     from .direct import score
 
@@ -82,7 +100,12 @@ def load_direct_scorer(model: str, max_tokens: int = 4096):
     def score_fn(row: dict) -> dict:
         return score(loaded_model, tokenizer, row, metadata, max_tokens, processor)
 
-    return score_fn, metadata
+    def batch_fn(state: str, image, criteria):
+        return score_batch(
+            loaded_model, tokenizer, metadata, state, image, criteria, max_tokens, processor
+        )
+
+    return score_fn, batch_fn, metadata
 
 
 def fake_scorer():
@@ -108,6 +131,54 @@ def fake_scorer():
         }
 
     return score_fn
+
+
+def fake_batch_scorer():
+    """Deterministic batch scorer mirroring the fake single scorer shape."""
+
+    def batch_fn(state: str, image, criteria):
+        import math
+
+        if not isinstance(criteria, list) or not criteria:
+            raise ValueError("criteria must be a nonempty list")
+        started = time.perf_counter()
+        results = []
+        for index, criterion in enumerate(criteria):
+            options = criterion["options"]
+            logits = [float(len(option["description"]) % 7 + position) for position, option in enumerate(options)]
+            maximum = max(logits)
+            weights = [math.exp(value - maximum) for value in logits]
+            total = sum(weights)
+            per_task = 0.001
+            results.append(
+                {
+                    "id": criterion.get("id") or f"criterion-{index}",
+                    "option_ids": [option["id"] for option in options],
+                    "probabilities": [weight / total for weight in weights],
+                    "option_logits": logits,
+                    "has_image": bool(image),
+                    "image_tokens": 0,
+                    "input_tokens": 42,
+                    "prompt_version": "fake-v1",
+                    "probability_status": "fake scorer for interface tests",
+                    "prefill_seconds": 0.002,
+                    "suffix_seconds": per_task,
+                    "total_seconds": 0.002 + per_task,
+                }
+            )
+        timing = {
+            "total_seconds": time.perf_counter() - started,
+            "encode_seconds": 0.0005,
+            "prefill_seconds": 0.002,
+            "suffix_seconds": 0.001 * len(results),
+            "image": bool(image),
+            "batch_size": len(results),
+            "prefix_tokens": 32,
+            "true_suffix_tokens": 16 * len(results),
+        }
+        return results, timing
+
+    return batch_fn
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -139,13 +210,16 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": {"message": f"unknown path {self.path}", "type": "invalid_request_error"}})
 
     def do_POST(self) -> None:
-        if self.path != "/decide":
+        if self.path not in {"/decide", "/decide-batch"}:
             self._send(404, {"error": {"message": f"unknown path {self.path}", "type": "invalid_request_error"}})
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
-            self._send(200, self.service.decide(body))
+            if self.path == "/decide":
+                self._send(200, self.service.decide(body))
+            else:
+                self._send(200, self.service.decide_batch(body))
         except Exception as error:  # surface a stable error envelope
             self._send(400, {"error": {"message": str(error), "type": "invalid_request_error"}})
 
@@ -168,11 +242,11 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.fake:
-        service = DecisionService(fake_scorer(), "telejev-fake")
+        service = DecisionService(fake_scorer(), "telejev-fake", fake_batch_scorer())
     else:
-        scorer, metadata = load_direct_scorer(args.model, args.max_tokens)
+        score_fn, batch_fn, metadata = load_model_scorers(args.model, args.max_tokens)
         print(f"Loaded model: multimodal={metadata['multimodal']}", flush=True)
-        service = DecisionService(scorer, args.model)
+        service = DecisionService(score_fn, args.model, batch_fn)
 
     httpd = serve(service, args.host, args.port)
     print(f"Serving '{service.model_name}' on http://{args.host}:{args.port}", flush=True)

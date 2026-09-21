@@ -75,6 +75,7 @@ python serve.py --fake
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `POST` | `/decide` | 请求体就是一条决策行（可含可选 `image`），返回固定决策对象。 |
+| `POST` | `/decide-batch` | 一份 state/image + 多个 criteria，共享一次图像 prefill；返回每个任务结果与耗时。 |
 | `GET` | `/health` | 存活探针，返回服务与模型名。 |
 
 调用原生接口：
@@ -135,9 +136,59 @@ curl -X POST http://127.0.0.1:8000/decide \
 
 图像只有在 `--model` 暴露多模态 processor 时才会真正送入模型（启动时会打印 `multimodal=True/False`）；纯文本模型会直接报错。`--mode direct` 支持图像，`serial` / `shared` 不支持。返回的 `has_image` 标明本次是否使用了图像，`image_tokens` 是实际喂给视觉塔的图像 token 数（为 0 说明视觉没有生效）。
 
+### 批量判定（多任务）
+
+同一张画面判定多个行为时，用 `/decide-batch`：图像只 prefill 一次，避免每个任务重复编码。
+
+```bash
+curl -X POST http://127.0.0.1:8000/decide-batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "state": "监控画面截图。",
+    "image": "https://ossv2.yoobit.cn/nife/demo.png",
+    "criteria": [
+      {"id": "fight", "question": "画面中是否有人正在打架？", "options": [{"id": "yes", "description": "画面中有人正在打架。"}, {"id": "no", "description": "画面中没有人正在打架。"}]},
+      {"id": "fall", "question": "画面中是否有人正在摔倒？", "options": [{"id": "yes", "description": "画面中有人正在摔倒。"}, {"id": "no", "description": "画面中没有人正在摔倒。"}]}
+    ]
+  }'
+```
+
+图像 prefill 1 次 + 判据后缀批量 1 次，共 **2 次前向**，与判据数量无关；各任务的 `suffix_seconds` 是这次批量前向的共享时间。
+
+响应：
+
+```json
+{
+  "results": [
+    {
+      "option_id": "no",
+      "letter": "B",
+      "probabilities": {"yes": 0.12, "no": 0.88},
+      "has_image": true,
+      "image_tokens": 1024,
+      "input_tokens": 312,
+      "prefill_seconds": 0.42,
+      "suffix_seconds": 0.03,
+      "total_seconds": 0.45
+    }
+  ],
+  "timing": {
+    "total_seconds": 0.61,
+    "encode_seconds": 0.16,
+    "prefill_seconds": 0.42,
+    "suffix_seconds": 0.03,
+    "image": true,
+    "batch_size": 4,
+    "prefix_tokens": 1280
+  }
+}
+```
+
+`timing.total_seconds` 覆盖编码、图像 prefill、判据前向与结果组装；每个任务的 `total_seconds = prefill_seconds + suffix_seconds`。
+
 ### 前端测试页
 
-`examples/index.html` 是单文件多任务测试页：勾选 打架 / 摔倒 / 挥手 / 捂胸口，对同一张画面分别调用 `/decide`，汇总每个任务的“有/无”判定与概率。可上传图像或用内置 OSS 示例图。
+`examples/index.html` 是单文件多任务测试页：勾选 打架 / 摔倒 / 挥手 / 捂胸口，对同一张画面一次调用 `/decide-batch`，汇总每个任务的“有/无”判定、概率与耗时，并展示整体耗时。可上传图像或用内置 OSS 示例图。
 
 ```bash
 python serve.py --fake          # 启动服务

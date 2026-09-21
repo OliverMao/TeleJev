@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TeleJev 多任务判定测试</title>
 <style>
-  :root { color-scheme: light dark; --line: #d0d7de; --accent: #2563eb; --ok: #16a34a; --bad: #dc2626; --warn: #d97706; }
+  :root { color-scheme: light dark; --line: #d0d7de; --accent: #2563eb; --ok: #16a34a; --bad: #dc2626; }
   * { box-sizing: border-box; }
   body { margin: 0; padding: 24px; font: 15px/1.5 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; max-width: 960px; margin-inline: auto; }
   h1 { font-size: 20px; margin: 0 0 4px; }
@@ -13,8 +13,7 @@
   fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin: 0 0 16px; }
   legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
   label { display: block; font-size: 13px; font-weight: 600; margin: 10px 0 4px; }
-  textarea, input[type="text"] { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font: inherit; background: transparent; color: inherit; }
-  textarea { resize: vertical; min-height: 56px; }
+  input[type="text"], select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font: inherit; background: transparent; color: inherit; }
   .server { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
   .server input { flex: 1 1 260px; }
   button { padding: 7px 14px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
@@ -29,6 +28,10 @@
   .tasks label { display: flex; gap: 8px; align-items: center; margin: 0; font-weight: 400; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
   .tasks input { margin: 0; }
   #results { display: none; }
+  .timing { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .kv { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .kv .k { font-size: 12px; color: #666; }
+  .kv .v { font-weight: 700; font-variant-numeric: tabular-nums; }
   .task-result { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 10px; }
   .task-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
   .task-name { font-weight: 700; }
@@ -46,7 +49,7 @@
 </head>
 <body>
   <h1>TeleJev 多任务判定测试</h1>
-  <p class="sub">同一张画面，分别判定：打架 / 摔倒 / 挥手 / 捂胸口。先启动服务：<code>python serve.py --model Qwen/Qwen3.5-4B</code> 或 <code>python serve.py --fake</code></p>
+  <p class="sub">同一张画面，一次请求分别判定：打架 / 摔倒 / 挥手 / 捂胸口。先启动服务：<code>python serve.py --model Qwen/Qwen3.5-4B</code> 或 <code>python serve.py --fake</code></p>
 
   <div class="server">
     <label style="margin:0" for="base">服务地址</label>
@@ -72,10 +75,11 @@
 
   <div class="actions">
     <button id="run" class="primary">开始判定</button>
-    <span class="muted">提示：单卡服务会串行处理这些请求。</span>
+    <span class="muted">同一张图只 prefill 一次，判据批量一次：共 2 次前向。</span>
   </div>
 
   <section id="results">
+    <div class="timing" id="timing"></div>
     <div id="cards"></div>
     <h3 style="font-size:13px;margin:18px 0 6px">原始响应</h3>
     <pre id="raw"></pre>
@@ -111,18 +115,15 @@ function selectedTasks() {
     return box && box.checked;
   });
 }
-function buildRow(task) {
-  const row = {
-    id: `demo-${task.key}-${Date.now()}`,
-    state: STATE,
+function buildCriterion(task) {
+  return {
+    id: task.key,
     question: `画面中是否有人${task.verb}？`,
     options: [
       { id: "yes", description: `画面中有人${task.verb}。` },
       { id: "no", description: `画面中没有人${task.verb}。` },
     ],
   };
-  if (imageData) row.image = imageData;
-  return row;
 }
 
 function setStatus(text, ok) {
@@ -131,26 +132,16 @@ function setStatus(text, ok) {
   node.className = "status " + (ok ? "ok" : ok === false ? "bad" : "");
 }
 
-async function callDecide(row) {
-  const response = await fetch(BASE() + "/decide", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(row),
-  });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload?.error?.message || ("HTTP " + response.status));
-  return payload;
-}
-
 function escapeAttr(value) {
   return String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
+function seconds(value) {
+  return value == null ? "?" : Number(value).toFixed(4) + " s";
+}
 
 function renderCard(task, decision) {
-  const yes = decision.probabilities?.yes ?? (decision.option_id === "yes" ? 1 : 0);
   const isYes = decision.option_id === "yes";
-  const card = document.createElement("div");
-  card.className = "task-result";
+  const yes = decision.probabilities?.yes ?? (isYes ? 1 : 0);
   const bars = Object.entries(decision.probabilities || {})
     .map(([id, probability]) => {
       const best = id === decision.option_id;
@@ -161,14 +152,34 @@ function renderCard(task, decision) {
       </div>`;
     })
     .join("");
+  const card = document.createElement("div");
+  card.className = "task-result";
   card.innerHTML = `
     <div class="task-head">
       <span class="task-name">${task.label}</span>
       <span class="verdict ${isYes ? "yes" : "no"}">${isYes ? "有" : "无"}（${(Number(yes) * 100).toFixed(1)}%）</span>
     </div>
-    <div class="meta">${escapeAttr(decision.option_id)} · input_tokens=${decision.input_tokens ?? "?"} · image=${decision.has_image ? "是" : "否"} · image_tokens=${decision.image_tokens ?? "?"}</div>
+    <div class="meta">${escapeAttr(decision.option_id)} · image_tokens=${decision.image_tokens ?? "?"} · input_tokens=${decision.input_tokens ?? "?"} · 本任务耗时=${seconds(decision.total_seconds)}（prefill ${seconds(decision.prefill_seconds)} + 后缀 ${seconds(decision.suffix_seconds)}）</div>
     ${bars}`;
   return card;
+}
+
+function renderTiming(timing) {
+  const box = $("timing");
+  box.innerHTML = "";
+  const items = [
+    ["整体耗时", seconds(timing.total_seconds)],
+    ["图像 prefill", seconds(timing.prefill_seconds)],
+    ["判据前向", seconds(timing.suffix_seconds)],
+    ["任务数", timing.batch_size ?? "?"],
+    ["前缀 tokens", timing.prefix_tokens ?? "?"],
+  ];
+  items.forEach(([k, v]) => {
+    const div = document.createElement("div");
+    div.className = "kv";
+    div.innerHTML = `<div class="k">${k}</div><div class="v">${escapeAttr(v)}</div>`;
+    box.appendChild(div);
+  });
 }
 
 async function runAll() {
@@ -176,27 +187,39 @@ async function runAll() {
   if (!tasks.length) { setStatus("请至少勾选一个任务", false); return; }
   $("results").style.display = "block";
   $("cards").innerHTML = "";
+  $("timing").innerHTML = "";
   $("raw").textContent = "";
   setStatus("判定中…");
 
-  const responses = [];
-  let failures = 0;
-  for (const task of tasks) {
-    try {
-      const decision = await callDecide(buildRow(task));
-      $("cards").appendChild(renderCard(task, decision));
-      responses.push({ task: task.key, request: buildRow(task), response: decision });
-    } catch (error) {
-      failures += 1;
-      const card = document.createElement("div");
-      card.className = "task-result";
-      card.innerHTML = `<div class="task-head"><span class="task-name">${task.label}</span><span class="verdict yes">失败</span></div><div class="meta">${escapeAttr(error.message)}</div>`;
-      $("cards").appendChild(card);
-      responses.push({ task: task.key, error: error.message });
-    }
+  const body = {
+    state: STATE,
+    criteria: tasks.map(buildCriterion),
+  };
+  if (imageData) body.image = imageData;
+
+  try {
+    const response = await fetch(BASE() + "/decide-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data?.error?.message || ("HTTP " + response.status));
+
+    data.results.forEach((decision, index) => {
+      $("cards").appendChild(renderCard(tasks[index], decision));
+    });
+    renderTiming(data.timing || {});
+    $("raw").textContent = JSON.stringify(data, null, 2);
+    setStatus("完成", true);
+  } catch (error) {
+    setStatus("失败：" + error.message, false);
+    const card = document.createElement("div");
+    card.className = "task-result";
+    card.innerHTML = `<div class="meta">${escapeAttr(error.message)}</div>`;
+    $("cards").appendChild(card);
+    $("raw").textContent = error.message;
   }
-  $("raw").textContent = JSON.stringify(responses, null, 2);
-  setStatus(failures ? `${tasks.length - failures}/${tasks.length} 成功` : "全部完成", failures === 0);
 }
 
 $("health").addEventListener("click", async () => {
