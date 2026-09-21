@@ -16,6 +16,7 @@ Endpoints
 GET  /health        liveness probe
 POST /decide        one decision row -> fixed decision object
 POST /decide-batch  one state/image + many criteria, sharing one image prefill
+POST /generate      same criteria via full greedy autoregressive generation
 
 ``image`` is optional and may be a base64 ``data:`` URI, an ``http(s)`` URL, or a
 local file path. It is only used when the loaded model exposes a multimodal
@@ -64,9 +65,10 @@ def canonical_decision(raw: dict) -> dict:
 class DecisionService:
     """Thread-safe wrapper around single-row and batch scorers."""
 
-    def __init__(self, score_fn, model_name: str, batch_fn=None):
+    def __init__(self, score_fn, model_name: str, batch_fn=None, generate_fn=None):
         self._score = score_fn
         self._batch = batch_fn
+        self._generate = generate_fn
         self.model_name = model_name
         self._lock = threading.Lock()
 
@@ -90,9 +92,23 @@ class DecisionService:
         timing["total_seconds"] = time.perf_counter() - started
         return {"results": [canonical_decision(result) for result in results], "timing": timing}
 
+    def generate(self, body: dict) -> dict:
+        if self._generate is None:
+            raise ValueError("Generation is not available on this server")
+        started = time.perf_counter()
+        state = body.get("state")
+        image = body.get("image")
+        criteria = body.get("criteria")
+        max_new_tokens = body.get("max_new_tokens")
+        with self._lock:
+            result = self._generate(state, image, criteria, max_new_tokens)
+        result["request_seconds"] = time.perf_counter() - started
+        return result
+
 
 def load_model_scorers(model: str, max_tokens: int = 4096):
-    """Load one CUDA model and return (single scorer, batch scorer, metadata)."""
+    """Load one CUDA model and return (single scorer, batch scorer, generate scorer, metadata)."""
+    from .autoregressive import generate_answers
     from .batch import score_batch
     from .core import load_causal_model
     from .direct import score
@@ -107,7 +123,12 @@ def load_model_scorers(model: str, max_tokens: int = 4096):
             loaded_model, tokenizer, metadata, state, image, criteria, max_tokens, processor
         )
 
-    return score_fn, batch_fn, metadata
+    def generate_fn(state: str, image, criteria, max_new_tokens):
+        return generate_answers(
+            loaded_model, tokenizer, processor, state, criteria, image, max_new_tokens
+        )
+
+    return score_fn, batch_fn, generate_fn, metadata
 
 
 def fake_scorer():
@@ -180,6 +201,35 @@ def fake_batch_scorer():
     return batch_fn
 
 
+def fake_generate():
+    """Deterministic generation stub for interface tests."""
+
+    def generate_fn(state: str, image, criteria, max_new_tokens):
+        started = time.perf_counter()
+        if not isinstance(criteria, list) or not criteria:
+            raise ValueError("criteria must be a nonempty list")
+        answers = []
+        for criterion in criteria:
+            logits = [len(option["description"]) % 7 + index for index, option in enumerate(criterion["options"])]
+            best = max(range(len(logits)), key=logits.__getitem__)
+            answers.append(criterion["options"][best]["id"])
+        text = "[" + ", ".join(f'"{answer}"' for answer in answers) + "]"
+        generate_seconds = 0.01 * len(criteria)
+        return {
+            "text": text,
+            "answers": answers,
+            "prompt_tokens": 42,
+            "new_tokens": 2 * len(criteria),
+            "encode_seconds": 0.0005,
+            "generate_seconds": generate_seconds,
+            "total_seconds": time.perf_counter() - started,
+            "tokens_per_second": (2 * len(criteria)) / generate_seconds if generate_seconds else None,
+            "has_image": bool(image),
+        }
+
+    return generate_fn
+
+
 class _Handler(BaseHTTPRequestHandler):
     service: DecisionService = None  # type: ignore[assignment]
 
@@ -209,7 +259,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": {"message": f"unknown path {self.path}", "type": "invalid_request_error"}})
 
     def do_POST(self) -> None:
-        if self.path not in {"/decide", "/decide-batch"}:
+        if self.path not in {"/decide", "/decide-batch", "/generate"}:
             self._send(404, {"error": {"message": f"unknown path {self.path}", "type": "invalid_request_error"}})
             return
         try:
@@ -217,8 +267,10 @@ class _Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
             if self.path == "/decide":
                 self._send(200, self.service.decide(body))
-            else:
+            elif self.path == "/decide-batch":
                 self._send(200, self.service.decide_batch(body))
+            else:
+                self._send(200, self.service.generate(body))
         except Exception as error:  # surface a stable error envelope
             self._send(400, {"error": {"message": str(error), "type": "invalid_request_error"}})
 
@@ -241,11 +293,11 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.fake:
-        service = DecisionService(fake_scorer(), "telejev-fake", fake_batch_scorer())
+        service = DecisionService(fake_scorer(), "telejev-fake", fake_batch_scorer(), fake_generate())
     else:
-        score_fn, batch_fn, metadata = load_model_scorers(args.model, args.max_tokens)
+        score_fn, batch_fn, generate_fn, metadata = load_model_scorers(args.model, args.max_tokens)
         print(f"Loaded model: multimodal={metadata['multimodal']}", flush=True)
-        service = DecisionService(score_fn, args.model, batch_fn)
+        service = DecisionService(score_fn, args.model, batch_fn, generate_fn)
 
     httpd = serve(service, args.host, args.port)
     print(f"Serving '{service.model_name}' on http://{args.host}:{args.port}", flush=True)

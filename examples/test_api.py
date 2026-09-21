@@ -109,12 +109,18 @@ def main() -> None:
             assert key in timing, key
         assert timing["batch_size"] == len(BATCH["criteria"])
 
-        # 4. Health probe reports the model name.
+        # 4. Full autoregressive generation returns answers and timing.
+        gen = post(base, "/generate", {"state": BATCH["state"], "image": TINY_PNG, "criteria": BATCH["criteria"]})
+        assert len(gen["answers"]) == len(BATCH["criteria"])
+        for key in ("text", "new_tokens", "generate_seconds", "total_seconds", "request_seconds"):
+            assert key in gen, key
+
+        # 5. Health probe reports the model name.
         with urllib.request.urlopen(base + "/health") as response:
             health = json.loads(response.read())
         assert health["model"] == "telejev-fake"
 
-        # 5. Unknown paths are rejected.
+        # 6. Unknown paths are rejected.
         try:
             post(base, "/v1/chat/completions", {})
             raise AssertionError("expected /v1/chat/completions to be gone")

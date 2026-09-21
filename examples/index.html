@@ -43,6 +43,7 @@
   .bar { height: 14px; background: #0001; border-radius: 7px; overflow: hidden; }
   .bar > i { display: block; height: 100%; background: var(--accent); }
   .bar-row.best .bar > i { background: var(--ok); }
+  .cmp-row { display: grid; grid-template-columns: 70px 1fr 1fr 40px; gap: 8px; align-items: center; font-size: 13px; margin-bottom: 4px; }
   pre { background: #0000000d; border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow: auto; font-size: 12.5px; }
   .muted { color: #666; font-size: 12px; }
 </style>
@@ -75,12 +76,14 @@
 
   <div class="actions">
     <button id="run" class="primary">开始判定</button>
+    <label style="margin:0;font-weight:400"><input type="checkbox" id="withGen"> 同时跑完整自回归对比（model.generate）</label>
     <span class="muted">同一张图只 prefill 一次，判据批量一次：共 2 次前向。</span>
   </div>
 
   <section id="results">
     <div class="timing" id="timing"></div>
     <div id="cards"></div>
+    <div id="compare"></div>
     <h3 style="font-size:13px;margin:18px 0 6px">原始响应</h3>
     <pre id="raw"></pre>
   </section>
@@ -222,9 +225,58 @@ async function runPerTask(tasks) {
     total += data.total_seconds || 0;
     responses.push({ task: task.key, response: data });
   }
-  renderTiming({ total_seconds: total, batch_size: tasks.length, fallback: true });
+  const timing = { total_seconds: total, batch_size: tasks.length, fallback: true };
+  renderTiming(timing);
   $("raw").textContent = JSON.stringify({ results: responses }, null, 2);
-  return responses;
+  return { results: responses.map((item) => item.response), timing };
+}
+
+function timingCard(label, value) {
+  return `<div class="kv"><div class="k">${label}</div><div class="v">${escapeAttr(value)}</div></div>`;
+}
+
+function renderCompare(tasks, direct, generation) {
+  const directResults = direct.results || [];
+  const answers = generation.answers || [];
+  let agree = 0;
+  const rows = tasks.map((task, index) => {
+    const directLabel = directResults[index]?.option_id || "?";
+    const genLabel = answers[index] || "?";
+    const same = directLabel === genLabel;
+    if (same) agree += 1;
+    return `<div class="cmp-row"><span>${task.label}</span><span>direct：${directLabel}</span><span>generate：${genLabel}</span><span>${same ? "✓" : "✗"}</span></div>`;
+  }).join("");
+  const directTotal = direct.timing?.inference_seconds ?? direct.timing?.total_seconds;
+  const speed = (generation.generate_seconds && directTotal) ? generation.generate_seconds / directTotal : null;
+  $("compare").innerHTML = `
+    <h3 style="font-size:13px;margin:18px 0 6px">自回归对比（model.generate）</h3>
+    <div class="timing">
+      ${timingCard("direct 总耗时", seconds(directTotal))}
+      ${timingCard("generate 耗时", seconds(generation.generate_seconds))}
+      ${timingCard("生成 tokens", generation.new_tokens ?? "?")}
+      ${timingCard("tok/s", generation.tokens_per_second ? generation.tokens_per_second.toFixed(1) : "?")}
+      ${timingCard("generate / direct", speed ? speed.toFixed(1) + "x" : "?")}
+      ${timingCard("判定一致", agree + "/" + tasks.length)}
+    </div>
+    <div class="task-result">${rows}</div>
+    <div class="meta">生成文本：${escapeAttr(generation.text || "")}</div>`;
+}
+
+async function runGeneration(tasks, direct) {
+  $("compare").innerHTML = "";
+  const body = { state: STATE, criteria: tasks.map(buildCriterion) };
+  if (imageData) body.image = imageData;
+  try {
+    const { response, data, text } = await postJson("/generate", body);
+    if (response.status === 404) {
+      $("compare").innerHTML = '<div class="meta">服务端无 /generate，无法做自回归对比（请更新并重启服务端）</div>';
+      return;
+    }
+    if (!response.ok) throw new Error(`HTTP ${response.status} ${data?.error?.message || text.slice(0, 300)}`);
+    renderCompare(tasks, direct, data);
+  } catch (error) {
+    $("compare").innerHTML = `<div class="meta">自回归对比失败：${escapeAttr(error.message)}</div>`;
+  }
 }
 
 async function runAll() {
@@ -233,6 +285,7 @@ async function runAll() {
   $("results").style.display = "block";
   $("cards").innerHTML = "";
   $("timing").innerHTML = "";
+  $("compare").innerHTML = "";
   $("raw").textContent = "";
   setStatus("判定中…");
 
@@ -240,10 +293,14 @@ async function runAll() {
   if (imageData) body.image = imageData;
 
   try {
-    const batched = await runBatch(tasks, body);
-    if (batched) { setStatus("完成（/decide-batch）", true); return; }
-    setStatus("服务端无 /decide-batch（404），已回退逐任务 /decide；请更新并重启服务端", false);
-    await runPerTask(tasks);
+    let direct = await runBatch(tasks, body);
+    if (direct) {
+      setStatus("完成（/decide-batch）", true);
+    } else {
+      setStatus("服务端无 /decide-batch（404），已回退逐任务 /decide；请更新并重启服务端", false);
+      direct = await runPerTask(tasks);
+    }
+    if ($("withGen").checked) await runGeneration(tasks, direct);
   } catch (error) {
     setStatus("失败：" + error.message, false);
     const card = document.createElement("div");

@@ -76,6 +76,7 @@ python serve.py --fake
 |---|---|---|
 | `POST` | `/decide` | 请求体就是一条决策行（可含可选 `image`），返回固定决策对象。 |
 | `POST` | `/decide-batch` | 一份 state/image + 多个 criteria，共享一次图像 prefill；返回每个任务结果与耗时。 |
+| `POST` | `/generate` | 同一组 criteria 走完整自回归生成（`model.generate`），返回文本、解析结果与耗时。 |
 | `GET` | `/health` | 存活探针，返回服务与模型名。 |
 
 调用原生接口：
