@@ -37,7 +37,6 @@ Modes:
 - `--mode direct` — one forward pass per row, reading declared option logits.
 - `--mode serial` — reuse a shared prefix across rows.
 - `--mode shared` — prefill an identical state once, then branch across criteria in parallel.
-- `--mode reranker` — native option reranking.
 
 Only one CUDA GPU may be visible to the process; use `CUDA_VISIBLE_DEVICES` to select it.
 

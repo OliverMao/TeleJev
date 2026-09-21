@@ -1,3 +1,3 @@
-"""TeleJev: direct option-logit and native reranker baselines."""
+"""TeleJev: direct option-logit baselines."""
 
 __version__ = "0.1.0"

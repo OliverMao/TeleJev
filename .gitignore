@@ -4,6 +4,5 @@ __pycache__/
 .pytest_cache/
 *.pyc
 results*.jsonl
-reranker-results*.jsonl
 models/
 cache/
