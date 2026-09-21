@@ -100,5 +100,8 @@ def generate_answers(model, tokenizer, processor, state, criteria, image_ref=Non
         "generate_seconds": generate_seconds,
         "total_seconds": time.perf_counter() - started,
         "tokens_per_second": (new_tokens / generate_seconds) if generate_seconds > 0 else None,
+        "prefill_passes": 1,
+        "decode_passes": new_tokens,
+        "forward_passes": 1 + new_tokens,
         "has_image": has_image,
     }

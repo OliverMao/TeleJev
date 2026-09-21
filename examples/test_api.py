@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from telejev.api import DecisionService, fake_batch_scorer, fake_scorer, serve  # noqa: E402
+from telejev.api import DecisionService, fake_batch_scorer, fake_generate, fake_scorer, serve  # noqa: E402
 
 # 1x1 transparent PNG, used to exercise the optional image field.
 TINY_PNG = (
@@ -82,7 +82,7 @@ def post(base: str, path: str, body: dict) -> dict:
 
 
 def main() -> None:
-    service = DecisionService(fake_scorer(), "telejev-fake", fake_batch_scorer())
+    service = DecisionService(fake_scorer(), "telejev-fake", fake_batch_scorer(), fake_generate())
     httpd = serve(service, "127.0.0.1", 0)
     port = httpd.server_address[1]
     base = f"http://127.0.0.1:{port}"
@@ -105,15 +105,17 @@ def main() -> None:
             assert EXPECTED_KEYS <= set(result), result.keys()
         assert batch["results"][0]["has_image"] is True
         timing = batch["timing"]
-        for key in ("total_seconds", "inference_seconds", "image_seconds", "prefill_seconds", "suffix_seconds", "batch_size"):
+        for key in ("total_seconds", "inference_seconds", "image_seconds", "prefill_seconds", "suffix_seconds", "batch_size", "forward_passes"):
             assert key in timing, key
         assert timing["batch_size"] == len(BATCH["criteria"])
+        assert timing["forward_passes"] == 2
 
         # 4. Full autoregressive generation returns answers and timing.
         gen = post(base, "/generate", {"state": BATCH["state"], "image": TINY_PNG, "criteria": BATCH["criteria"]})
         assert len(gen["answers"]) == len(BATCH["criteria"])
-        for key in ("text", "new_tokens", "generate_seconds", "total_seconds", "request_seconds"):
+        for key in ("text", "new_tokens", "generate_seconds", "total_seconds", "request_seconds", "forward_passes"):
             assert key in gen, key
+        assert gen["forward_passes"] == 1 + gen["new_tokens"]
 
         # 5. Health probe reports the model name.
         with urllib.request.urlopen(base + "/health") as response:

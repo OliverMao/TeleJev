@@ -195,6 +195,9 @@ def fake_batch_scorer():
             "batch_size": len(results),
             "prefix_tokens": 32,
             "true_suffix_tokens": 16 * len(results),
+            "prefill_passes": 1,
+            "suffix_passes": 1,
+            "forward_passes": 2,
         }
         return results, timing
 
@@ -215,15 +218,19 @@ def fake_generate():
             answers.append(criterion["options"][best]["id"])
         text = "[" + ", ".join(f'"{answer}"' for answer in answers) + "]"
         generate_seconds = 0.01 * len(criteria)
+        new_tokens = 2 * len(criteria)
         return {
             "text": text,
             "answers": answers,
             "prompt_tokens": 42,
-            "new_tokens": 2 * len(criteria),
+            "new_tokens": new_tokens,
             "encode_seconds": 0.0005,
             "generate_seconds": generate_seconds,
             "total_seconds": time.perf_counter() - started,
-            "tokens_per_second": (2 * len(criteria)) / generate_seconds if generate_seconds else None,
+            "tokens_per_second": new_tokens / generate_seconds if generate_seconds else None,
+            "prefill_passes": 1,
+            "decode_passes": new_tokens,
+            "forward_passes": 1 + new_tokens,
             "has_image": bool(image),
         }
 

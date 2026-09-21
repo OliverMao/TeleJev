@@ -262,10 +262,12 @@ function renderCompare(criteria, direct, generation, output) {
     <h3 style="font-size:13px;margin:18px 0 6px">自回归对比（model.generate）</h3>
     <div class="timing">
       ${timingCard("Jev 总耗时", seconds(directTotal))}
+      ${timingCard("Jev 前向次数", direct.timing?.forward_passes ?? 2)}
       ${timingCard("generate 耗时", seconds(generation.generate_seconds))}
+      ${timingCard("generate 前向次数", generation.forward_passes ?? (1 + (generation.new_tokens || 0)))}
       ${timingCard("生成 tokens", generation.new_tokens ?? "?")}
       ${timingCard("tok/s", generation.tokens_per_second ? generation.tokens_per_second.toFixed(1) : "?")}
-      ${timingCard("generate / direct", speed ? speed.toFixed(1) + "x" : "?")}
+      ${timingCard("generate / Jev", speed ? speed.toFixed(1) + "x" : "?")}
       ${timingCard("判定一致", agree + "/" + criteria.length)}
     </div>
     <h3 style="font-size:13px;margin:14px 0 6px">generate 输出</h3>

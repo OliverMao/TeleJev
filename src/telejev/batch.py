@@ -165,6 +165,9 @@ def _shared_suffix(model, rows, encoded, prefix_ids, pad, cache, device, prefill
         "prefix_tokens": len(prefix_ids),
         "true_suffix_tokens": sum(len(ids) - len(prefix_ids) for ids, _, _, _ in encoded),
         "padded_suffix_tokens": len(rows) * len(layout["input_ids"][0]),
+        "prefill_passes": 1,
+        "suffix_passes": 1,
+        "forward_passes": 2,
     }
     return results, suffix_seconds, timing
 
