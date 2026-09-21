@@ -7,3 +7,4 @@ tokenizers
 numpy
 sentencepiece
 protobuf
+pillow

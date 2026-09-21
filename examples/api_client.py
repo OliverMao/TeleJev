@@ -11,11 +11,15 @@ or without a GPU::
 
 Then run this client::
 
-    python examples/api_client.py
+    python examples/api_client.py                  # text-only decision
+    python examples/api_client.py path/to/shot.png # decision with an image
 """
 
+import base64
 import json
+import sys
 import urllib.request
+from pathlib import Path
 
 BASE = "http://127.0.0.1:8000"
 
@@ -41,19 +45,17 @@ def post(path: str, body: dict) -> dict:
         return json.loads(response.read())
 
 
-def main() -> None:
-    # A. Native call: send the decision row directly.
-    decision = post("/decide", ROW)
-    print("decision:", json.dumps(decision, ensure_ascii=False))
+def with_image(row: dict, path: str) -> dict:
+    payload = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    suffix = (Path(path).suffix.lstrip(".") or "png").lower()
+    return {**row, "image": f"data:image/{suffix};base64,{payload}"}
 
-    # B. OpenAI-compatible call: same payload as the last user message.
-    payload = {key: ROW[key] for key in ("state", "question", "options")}
-    completion = post(
-        "/v1/chat/completions",
-        {"model": "telejev", "messages": [{"role": "user", "content": json.dumps(payload)}]},
-    )
-    content = completion["choices"][0]["message"]["content"]
-    print("openai content:", content)
+
+def main() -> None:
+    print("decision:", json.dumps(post("/decide", ROW), ensure_ascii=False))
+    if len(sys.argv) > 1:
+        result = post("/decide", with_image(ROW, sys.argv[1]))
+        print("decision+image:", json.dumps(result, ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -56,17 +56,19 @@ def score_shared(model, tokenizer, rows: list[dict], metadata: dict, max_tokens:
 
     if not rows or any(row["state"] != rows[0]["state"] for row in rows[1:]):
         raise ValueError("Shared scoring requires one nonempty exact state")
+    if any(row.get("image") for row in rows):
+        raise ValueError("Image input is supported in direct mode only")
     if len({row["id"] for row in rows}) != len(rows):
         raise ValueError("Decision IDs must be unique")
     started = time.perf_counter()
     encoded = [encode_prompt(tokenizer, row, max_tokens) for row in rows]
     prefix = _state_prefix(tokenizer, rows[0]["state"])
-    if not prefix or any(ids[: len(prefix)] != prefix or len(ids) <= len(prefix) for ids, _, _ in encoded):
+    if not prefix or any(ids[: len(prefix)] != prefix or len(ids) <= len(prefix) for ids, _, _, _ in encoded):
         raise ValueError("The fixed state prefix does not match every full prompt")
     pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     if pad is None:
         raise ValueError("Tokenizer requires a padding or EOS token")
-    layout, ends = _suffix_layout([ids[len(prefix) :] for ids, _, _ in encoded], len(prefix), pad)
+    layout, ends = _suffix_layout([ids[len(prefix) :] for ids, _, _, _ in encoded], len(prefix), pad)
     selected_positions = sorted(set(ends))
     encode_seconds = time.perf_counter() - started
     device = next(model.parameters()).device
@@ -113,7 +115,7 @@ def score_shared(model, tokenizer, rows: list[dict], metadata: dict, max_tokens:
         sync()
         suffix_seconds = time.perf_counter() - mark
         results = []
-        for index, (row, (ids, slots, prompt_hash)) in enumerate(zip(rows, encoded)):
+        for index, (row, (ids, slots, prompt_hash, _)) in enumerate(zip(rows, encoded)):
             vocabulary = output.logits[index, selected_positions.index(ends[index]), :].float()
             selected = vocabulary[slots].cpu().tolist()
             results.append(
@@ -140,7 +142,7 @@ def score_shared(model, tokenizer, rows: list[dict], metadata: dict, max_tokens:
         "replicate_seconds": replicate_seconds,
         "suffix_forward_seconds": suffix_seconds,
         "batch_size": len(rows),
-        "true_suffix_tokens": sum(len(ids) - len(prefix) for ids, _, _ in encoded),
+        "true_suffix_tokens": sum(len(ids) - len(prefix) for ids, _, _, _ in encoded),
         "padded_suffix_tokens": len(rows) * len(layout["input_ids"][0]),
     }
     return results, timing

@@ -27,7 +27,7 @@ def main() -> None:
         parser.error("Input is empty")
     for row in rows:
         validate_row(row)
-    model, tokenizer, metadata = load_causal_model(args.model)
+    model, tokenizer, processor, metadata = load_causal_model(args.model)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x") as destination:
         if args.mode == "shared":
@@ -41,7 +41,7 @@ def main() -> None:
                 destination.flush()
         else:
             for row in rows:
-                destination.write(json.dumps(direct_score(model, tokenizer, row, metadata, args.max_tokens), allow_nan=False) + "\n")
+                destination.write(json.dumps(direct_score(model, tokenizer, row, metadata, args.max_tokens, processor), allow_nan=False) + "\n")
                 destination.flush()
 
 

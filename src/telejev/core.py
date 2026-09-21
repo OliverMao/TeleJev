@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
 import json
 import math
+import urllib.request
 from pathlib import Path
 
 LETTERS = "ABCDEFGHIJKLMNOP"
@@ -37,6 +40,9 @@ def validate_row(row: dict) -> None:
         ids.append(option["id"])
     if len(ids) != len(set(ids)):
         raise ValueError("Option IDs must be unique")
+    image = row.get("image")
+    if image is not None and (not isinstance(image, str) or not image):
+        raise ValueError("image must be a nonempty string (data URI, URL, or local path)")
 
 
 def direct_messages(row: dict) -> list[dict]:
@@ -68,8 +74,33 @@ def digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def load_image(reference: str):
+    """Resolve an image reference to a PIL image.
+
+    Accepts a base64 ``data:`` URI, an ``http(s)`` URL, or a local file path.
+    """
+    from PIL import Image
+
+    if reference.startswith("data:"):
+        header, _, encoded = reference.partition(",")
+        if "base64" not in header:
+            raise ValueError("Image data URI must be base64 encoded")
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError) as error:
+            raise ValueError("Image data URI is not valid base64") from error
+        return Image.open(io.BytesIO(payload)).convert("RGB")
+    if reference.startswith(("http://", "https://")):
+        with urllib.request.urlopen(reference, timeout=30) as response:
+            return Image.open(io.BytesIO(response.read())).convert("RGB")
+    path = Path(reference)
+    if not path.is_file():
+        raise ValueError(f"Image file not found: {reference}")
+    return Image.open(path).convert("RGB")
+
+
 def load_causal_model(source: str):
-    """Load one causal model on the sole visible CUDA device."""
+    """Load one causal model (and its processor) on the sole visible CUDA device."""
     import torch
     import transformers
 
@@ -79,6 +110,12 @@ def load_causal_model(source: str):
     common = {"local_files_only": local, "trust_remote_code": False}
     config = transformers.AutoConfig.from_pretrained(source, **common)
     tokenizer = transformers.AutoTokenizer.from_pretrained(source, **common)
+    try:
+        processor = transformers.AutoProcessor.from_pretrained(source, **common)
+        if getattr(processor, "image_processor", None) is None:
+            processor = None
+    except (ValueError, OSError):
+        processor = None
     cls = transformers.AutoModelForCausalLM
     if config.model_type in {"qwen3_5", "qwen3_5_text"}:
         cls = getattr(transformers, "Qwen3_5ForCausalLM", None)
@@ -100,7 +137,8 @@ def load_causal_model(source: str):
     metadata = {
         "source": source,
         "dtype": "bfloat16",
+        "multimodal": processor is not None,
         "torch_version": torch.__version__,
         "transformers_version": transformers.__version__,
     }
-    return model, tokenizer, metadata
+    return model, tokenizer, processor, metadata

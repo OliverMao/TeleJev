@@ -56,8 +56,10 @@ class SerialPrefixScorer:
     def score(self, row: dict) -> dict:
         import torch
 
+        if row.get("image"):
+            raise ValueError("Image input is supported in direct mode only")
         started = time.perf_counter()
-        ids, slots, prompt_hash = encode_prompt(self.tokenizer, row, self.max_tokens)
+        ids, slots, prompt_hash, _ = encode_prompt(self.tokenizer, row, self.max_tokens)
         hit = self.cache is not None and row["state"] == self.state
         prefix = self.prefix if hit else _state_prefix(self.tokenizer, row["state"])
         if not prefix or ids[: len(prefix)] != prefix or len(ids) <= len(prefix):

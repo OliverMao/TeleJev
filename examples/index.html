@@ -41,10 +41,9 @@
 <body>
   <h1>TeleJev 决策接口测试</h1>
   <p class="sub">先启动服务：<code>python serve.py --fake</code>（无 GPU 联调）或 <code>python serve.py --model Qwen/Qwen3.5-4B</code></p>
-
   <div class="server">
     <label style="margin:0" for="base">服务地址</label>
-    <input id="base" type="text" value="http://127.0.0.1:8000">
+    <input id="base" type="text" value="http://127.0.0.1:22001">
     <button id="health" class="ghost">检查 /health</button>
     <span id="status" class="status"></span>
   </div>
@@ -61,9 +60,16 @@
     <button id="addOption" class="ghost">+ 添加选项</button>
   </fieldset>
 
+  <fieldset>
+    <legend>image（可选）</legend>
+    <input type="file" id="imageFile" accept="image/*">
+    <button id="clearImage" class="ghost">清除图像</button>
+    <div id="imageInfo" class="muted"></div>
+    <img id="imagePreview" alt="" style="display:none;max-width:220px;max-height:160px;margin-top:8px;border-radius:6px;border:1px solid var(--line)">
+  </fieldset>
+
   <div class="actions">
     <button id="callDecide" class="primary">调用 /decide</button>
-    <button id="callOpenAI">调用 /v1/chat/completions</button>
   </div>
 
   <section id="result">
@@ -117,12 +123,14 @@ $("addOption").addEventListener("click", () => {
 });
 
 function collectRow() {
-  return {
+  const row = {
     id: "demo-" + Date.now(),
     state: $("state").value,
     question: $("question").value,
     options: options.map((option) => ({ id: option.id, description: option.description })),
   };
+  if (imageData) row.image = imageData;
+  return row;
 }
 
 function setStatus(text, ok) {
@@ -142,25 +150,12 @@ async function callApi(path, body) {
   return payload;
 }
 
-async function run(kind) {
+async function run() {
   $("result").style.display = "none";
   setStatus("请求中…");
   try {
-    const row = collectRow();
-    let decision, raw;
-    if (kind === "decide") {
-      decision = await callApi("/decide", row);
-      raw = decision;
-    } else {
-      const payload = { state: row.state, question: row.question, options: row.options };
-      const completion = await callApi("/v1/chat/completions", {
-        model: "telejev",
-        messages: [{ role: "user", content: JSON.stringify(payload) }],
-      });
-      decision = JSON.parse(completion.choices[0].message.content);
-      raw = completion;
-    }
-    renderResult(decision, raw);
+    const decision = await callApi("/decide", collectRow());
+    renderResult(decision, decision);
     setStatus("成功", true);
   } catch (error) {
     setStatus("失败：" + error.message, false);
@@ -175,7 +170,7 @@ async function run(kind) {
 function renderResult(decision, raw) {
   $("result").style.display = "block";
   $("rawTitle").textContent = "原始响应";
-  $("chosen").innerHTML = `选中：${escapeAttr(decision.option_id)}（${escapeAttr(decision.letter)}） <small>input_tokens=${decision.input_tokens ?? "?"}</small>`;
+  $("chosen").innerHTML = `选中：${escapeAttr(decision.option_id)}（${escapeAttr(decision.letter)}） <small>input_tokens=${decision.input_tokens ?? "?"} · image=${decision.has_image ? "是" : "否"}</small>`;
 
   const entries = Object.entries(decision.probabilities || {});
   const bars = $("bars");
@@ -203,8 +198,28 @@ $("health").addEventListener("click", async () => {
     setStatus("无法连接：" + error.message, false);
   }
 });
-$("callDecide").addEventListener("click", () => run("decide"));
-$("callOpenAI").addEventListener("click", () => run("openai"));
+$("callDecide").addEventListener("click", run);
+
+let imageData = null;
+$("imageFile").addEventListener("change", (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    imageData = reader.result;
+    $("imagePreview").src = imageData;
+    $("imagePreview").style.display = "block";
+    $("imageInfo").textContent = `${file.name} · ${(file.size / 1024).toFixed(1)} KB`;
+  };
+  reader.readAsDataURL(file);
+});
+$("clearImage").addEventListener("click", () => {
+  imageData = null;
+  $("imageFile").value = "";
+  $("imagePreview").style.display = "none";
+  $("imagePreview").removeAttribute("src");
+  $("imageInfo").textContent = "";
+});
 
 renderOptions();
 </script>
