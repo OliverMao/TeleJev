@@ -1,80 +1,89 @@
-"""OpenAI-compatible wrapper around the Jev-style option readout.
+"""OpenAI-compatible Jev endpoint.
 
-The client sends a normal chat request (``messages`` with text and/or an image)
-that already instructs the model which answer to give, plus the set of allowed
-answers. Instead of generating tokens we run one prefill-only logprob read over
-those answers and return a normal ``chat.completion`` whose assistant content is
-the structured decision.
+From the client's point of view this is a normal autoregressive model: send one
+chat request (text and/or an image) and read one assistant message. Internally we
+never generate the answer token by token -- we fan out the monitoring tasks as
+several prefill-only logprob reads to the SGLang/vLLM server (which batches them)
+and assemble the fixed structured answer:
 
-How the allowed answers are supplied (either works):
+    {"has_person": 0 或 1, "violations": ["行为名称", ...]}
 
-- ``response_format`` json_schema with one ``enum`` property::
+Task names come from the request in this order:
 
-      {"type": "json_schema", "json_schema": {"name": "decision", "strict": true,
-       "schema": {"type": "object", "properties": {"department": {"enum": ["shipping", "billing"]}},
-                  "required": ["department"]}}}
+1. a top-level ``tasks`` list (strings or ``{"name"|"label"|"taskName": ...}``),
+2. ``任务名称：<name>`` lines found in the message text,
+3. a built-in default set.
 
-  The property name becomes the key of the returned object.
-
-- a top-level ``options`` list::
-
-      {"messages": [...], "options": ["yes", "no"]}
-
-  The returned object uses the key ``"choice"``.
-
-The response also carries ``telejev.probabilities`` (extra fields are ignored by
-OpenAI clients) and the per-label logprobs under ``choices[0].logprobs``.
+The ``violations`` always use the exact task name so the caller can light up the
+matching cards.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 
-DEFAULT_KEY = "choice"
+DEFAULT_TASKS = ["打架", "摔倒", "挥手", "捂胸口"]
+
+_TASK_RE = re.compile(r"任务名称[：:]\s*([^\n（(]+)")
+_YES, _NO = "A", "B"
+
+PERSON_INSTRUCTION = (
+    "只判断【最后一帧】画面中是否有人：有人只输出 A，没有人只输出 B。"
+    "不要输出其它任何内容。"
+)
 
 
-def extract_labels(body: dict) -> tuple[list[str], str]:
-    """Return (allowed labels, output key) from the request body."""
-    response_format = body.get("response_format")
-    if isinstance(response_format, dict) and response_format.get("type") == "json_schema":
-        json_schema = response_format.get("json_schema") or {}
-        schema = json_schema.get("schema") or {}
-        properties = schema.get("properties") or {}
-        for name, prop in properties.items():
-            enum = (prop or {}).get("enum")
-            if isinstance(enum, list) and enum:
-                return [str(item) for item in enum], str(name)
-
-    for field in ("options", "labels"):
-        value = body.get(field)
-        if isinstance(value, list) and value:
-            return [str(item) for item in value], DEFAULT_KEY
-
-    raise ValueError(
-        "Provide allowed answers via response_format json_schema enum, or a nonempty 'options' list"
+def task_instruction(name: str) -> str:
+    return (
+        f"只判断【最后一帧】是否存在「{name}」这一行为：存在只输出 A，不存在只输出 B。"
+        "不要输出其它任何内容。"
     )
 
 
-def build_completion(model: str, result: dict, key: str, labels: list[str]) -> dict:
-    """Wrap a label readout into an OpenAI chat.completion with structured content."""
-    probabilities = result.get("probabilities", {})
-    logprobs = result.get("logprobs", {})
-    chosen = max(probabilities, key=probabilities.get) if probabilities else None
-    content = json.dumps({key: chosen}, ensure_ascii=False, sort_keys=False)
-    top_logprobs = []
-    for label in labels:
-        value = logprobs.get(label)
-        top_logprobs.append(
-            {"token": label, "logprob": float(value) if value is not None else float("-inf")}
-        )
-    chosen_logprob = logprobs.get(chosen)
-    usage = {
-        "prompt_tokens": int(result.get("prompt_tokens", 0) or 0),
-        "completion_tokens": 0,
-        "total_tokens": int(result.get("prompt_tokens", 0) or 0),
-    }
+def _message_texts(messages: list) -> list[str]:
+    texts: list[str] = []
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    texts.append(str(part.get("text", "")))
+    return texts
+
+
+def extract_tasks(body: dict) -> list[str]:
+    """Task names to judge, from the body or parsed out of the prompt."""
+    declared = body.get("tasks")
+    if isinstance(declared, list) and declared:
+        names = []
+        for item in declared:
+            if isinstance(item, str):
+                name = item.strip()
+            elif isinstance(item, dict):
+                name = str(item.get("name") or item.get("label") or item.get("taskName") or "").strip()
+            else:
+                name = ""
+            if name:
+                names.append(name)
+        if names:
+            return list(dict.fromkeys(names))
+
+    blob = "\n".join(_message_texts(body.get("messages") or []))
+    found = [match.group(1).strip() for match in _TASK_RE.finditer(blob)]
+    found = [name for name in found if name]
+    return list(dict.fromkeys(found)) or list(DEFAULT_TASKS)
+
+
+def build_completion(model: str, output: dict, detail: dict) -> dict:
+    """Wrap the assembled decision in an OpenAI chat.completion envelope."""
+    content = json.dumps(output, ensure_ascii=False)
+    prompt_tokens = int(detail.get("prompt_tokens", 0) or 0)
+    usage = {"prompt_tokens": prompt_tokens, "completion_tokens": 0, "total_tokens": prompt_tokens}
     return {
         "id": "chatcmpl-" + hashlib.sha256(content.encode()).hexdigest()[:24],
         "object": "chat.completion",
@@ -85,17 +94,8 @@ def build_completion(model: str, result: dict, key: str, labels: list[str]) -> d
                 "index": 0,
                 "message": {"role": "assistant", "content": content},
                 "finish_reason": "stop",
-                "logprobs": {
-                    "content": [
-                        {
-                            "token": chosen or "",
-                            "logprob": float(chosen_logprob) if chosen_logprob is not None else 0.0,
-                            "top_logprobs": top_logprobs,
-                        }
-                    ]
-                },
             }
         ],
         "usage": usage,
-        "telejev": {"probabilities": probabilities, "chosen": chosen, "key": key},
+        "telejev": detail,
     }

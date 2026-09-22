@@ -106,7 +106,7 @@ python benchmarks/sglang_compare.py \
 | `POST` | `/decide` | 请求体就是一条决策行（可含可选 `image`），返回固定决策对象。 |
 | `POST` | `/decide-batch` | 一份 state/image + 多个 criteria，共享一次图像 prefill；返回每个任务结果与耗时。 |
 | `POST` | `/generate` | 同一组 criteria 走完整自回归生成（`model.generate`），返回文本、解析结果与耗时。 |
-| `POST` | `/v1/chat/completions` | OpenAI 兼容的 Jev 读取：客户端发 messages（可含图像）+ 允许答案，返回结构化 `chat.completion`。 |
+| `POST` | `/v1/chat/completions` | OpenAI 兼容：像普通模型一样发一次请求（图像 + 提示词），返回 `{has_person, violations}`。 |
 | `GET` | `/v1/models` | OpenAI 兼容的模型列表。 |
 | `GET` | `/health` | 存活探针，返回服务与模型名。 |
 
@@ -170,7 +170,13 @@ curl -X POST http://127.0.0.1:8000/decide \
 
 ### OpenAI 兼容的 Jev 接口
 
-把 Jev 式读 logits 包成一个标准 OpenAI 接口：客户端像平时一样发 `messages`（可含图像）和自定义提示词，再通过 `response_format` 的 `json_schema` enum（或顶层 `options`）告诉我们要读取哪些答案；服务端只做一次 prefill-only logprob 读取，返回结构化的 `chat.completion`，对客户端无感。
+`/v1/chat/completions` 对客户端来说就是**普通自回归模型**：发一次 chat 请求（可含图像 + 你自己的提示词），收到一条 assistant 消息。内部怎么打给 SGLang/vLLM 由服务端决定——它会针对每个任务（含“是否有人”）并发发一次 **prefill-only logprob 读取**，由服务端批处理，再拼装结果。**输出永远是**：
+
+```json
+{"has_person": 0 或 1, "violations": ["行为名称", ...]}
+```
+
+客户端只需在提示词里列出任务（或显式传 `tasks`）：
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/chat/completions \
@@ -178,31 +184,36 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
   -d '{
     "model": "telejev",
     "messages": [
-      {"role": "system", "content": "你是调度助手，只能从 港口/账单 里选一个标签。"},
+      {"role": "system", "content": "你是实时视频流助手，逐帧观察摄像头画面并判定监测行为。"},
       {"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
-        {"type": "text", "text": "这个请求该给哪个部门？只回答标签。"}
+        {"type": "text", "text": "任务名称：摔倒\n任务名称：挥手\n请只判定这些行为。"}
       ]}
     ],
-    "response_format": {"type": "json_schema", "json_schema": {"name": "route", "strict": true,
-      "schema": {"type": "object", "properties": {"department": {"type": "string", "enum": ["港口", "账单"]}}, "required": ["department"]}}}
+    "tasks": ["摔倒", "挥手"]
   }'
 ```
 
-返回（content 就是按 schema 形状组装的结构化结果）：
+返回：
 
 ```json
 {
   "object": "chat.completion",
-  "choices": [{"message": {"role": "assistant", "content": "{\"department\": \"账单\"}"}, "finish_reason": "stop"}],
-  "usage": {"prompt_tokens": 42, "completion_tokens": 0, "total_tokens": 42},
-  "telejev": {"probabilities": {"港口": 0.45, "账单": 0.55}, "chosen": "账单", "key": "department"}
+  "choices": [{"message": {"role": "assistant", "content": "{\"has_person\": 1, \"violations\": [\"挥手\"]}"}, "finish_reason": "stop"}],
+  "usage": {"prompt_tokens": 300, "completion_tokens": 0, "total_tokens": 300},
+  "telejev": {
+    "tasks": ["摔倒", "挥手"],
+    "has_person_probabilities": {"A": 0.9, "B": 0.1},
+    "violation_probabilities": {"摔倒": {"A": 0.2, "B": 0.8}, "挥手": {"A": 0.7, "B": 0.3}},
+    "requests": 3, "concurrency": 3
+  }
 }
 ```
 
-- 也支持顶层 `options`：`{"messages": [...], "options": ["yes", "no"]}` → 返回 `{"choice": "..."}`。
-- 读取的是选项的**首个 token** logprob（`max_tokens=1` + `logprobs`），因此标签需是单 token。
-- 该端点需 `--backend sglang|vllm`（复用服务端 tokenizer / 前缀缓存；本地进程内后端暂不支持）。
+- 任务名来源：优先顶层 `tasks`，否则从 messages 里的 `任务名称：X` 解析，都没有则用内置默认集合。
+- `violations` 里的名称与任务名逐字一致，便于前端按名点亮卡片。
+- `completion_tokens` 为 0（内部不生成 token）；概率放在额外字段 `telejev`，OpenAI 客户端会自动忽略。
+- 需 `--backend sglang|vllm`（复用服务端 tokenizer / 前缀缓存，并让并发请求在服务端成一个 batch）。
 
 ### 批量判定（多任务）
 

@@ -120,27 +120,21 @@ def main() -> None:
         assert set(gen["output"]) == {"has_person", "violations"}
         assert gen["forward_passes"] == 1 + gen["new_tokens"]
 
-        # 5. OpenAI-compatible Jev readout over client labels.
+        # 5. OpenAI-compatible Jev: one normal chat request -> {has_person, violations}.
         completion = post(base, "/v1/chat/completions", {
             "model": "telejev",
-            "messages": [{"role": "user", "content": "Answer with only the allowed label."}],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "decision",
-                    "schema": {
-                        "type": "object",
-                        "properties": {"department": {"enum": ["shipping", "billing"]}},
-                        "required": ["department"],
-                    },
-                },
-            },
+            "messages": [
+                {"role": "system", "content": "你是监控助手。"},
+                {"role": "user", "content": "任务清单：\n任务名称：摔倒\n任务名称：挥手\n请判定。"},
+            ],
         })
         assert completion["object"] == "chat.completion"
         content = json.loads(completion["choices"][0]["message"]["content"])
-        assert set(content) == {"department"}
-        assert content["department"] in {"shipping", "billing"}
-        assert set(completion["telejev"]["probabilities"]) == {"shipping", "billing"}
+        assert set(content) == {"has_person", "violations"}
+        assert content["has_person"] in (0, 1)
+        assert all(name in {"摔倒", "挥手"} for name in content["violations"])
+        assert completion["telejev"]["tasks"] == ["摔倒", "挥手"]
+        assert completion["telejev"]["requests"] == 3  # person + 2 tasks
         assert completion["usage"]["completion_tokens"] == 0
 
         # 5b. OpenAI-compatible model list.

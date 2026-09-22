@@ -112,18 +112,46 @@ class DecisionService:
         return result
 
     def openai_chat(self, body: dict) -> dict:
-        """OpenAI-compatible Jev readout: caller messages + allowed labels -> decision."""
+        """OpenAI-compatible Jev: one normal chat request -> {has_person, violations}."""
         if self._score_labels is None:
             raise ValueError("The OpenAI-compatible Jev endpoint requires --backend sglang or vllm")
-        from .openai_compat import build_completion, extract_labels
+        from concurrent.futures import ThreadPoolExecutor
 
-        labels, key = extract_labels(body)
+        from .openai_compat import PERSON_INSTRUCTION, build_completion, extract_tasks, task_instruction
+
         messages = body.get("messages")
         if not isinstance(messages, list) or not messages:
             raise ValueError("messages must be a nonempty list")
-        with self._lock:
-            result = self._score_labels(messages, labels)
-        return build_completion(self.model_name, result, key, labels)
+        tasks = extract_tasks(body)
+
+        def judge(instruction: str) -> dict:
+            request_messages = messages + [{"role": "user", "content": instruction}]
+            return self._score_labels(request_messages, ["A", "B"])
+
+        def hit(result: dict) -> bool:
+            probabilities = result.get("probabilities", {})
+            return probabilities.get("A", 0.0) >= probabilities.get("B", 0.0)
+
+        jobs = [PERSON_INSTRUCTION] + [task_instruction(name) for name in tasks]
+        workers = min(len(jobs), 32)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            outcomes = list(pool.map(judge, jobs))
+
+        output = {
+            "has_person": 1 if hit(outcomes[0]) else 0,
+            "violations": [name for name, result in zip(tasks, outcomes[1:]) if hit(result)],
+        }
+        detail = {
+            "tasks": tasks,
+            "has_person_probabilities": outcomes[0].get("probabilities", {}),
+            "violation_probabilities": {
+                name: outcomes[index + 1].get("probabilities", {}) for index, name in enumerate(tasks)
+            },
+            "requests": len(jobs),
+            "concurrency": workers,
+            "prompt_tokens": sum(int(result.get("prompt_tokens", 0) or 0) for result in outcomes),
+        }
+        return build_completion(self.model_name, output, detail)
 
 
 def load_model_scorers(model: str, max_tokens: int = 4096):
@@ -303,7 +331,7 @@ def help_document(model_name: str) -> dict:
             {"method": "POST", "path": "/decide", "description": "单条决策行 -> 固定决策对象。"},
             {"method": "POST", "path": "/decide-batch", "description": "一份 state/image + 多个 criteria，图像只 prefill 一次。"},
             {"method": "POST", "path": "/generate", "description": "同一组 criteria 走完整自回归，直接生成 {has_person, violations}。"},
-            {"method": "POST", "path": "/v1/chat/completions", "description": "OpenAI 兼容的 Jev 读取：messages + 允许答案 -> 结构化结果。"},
+            {"method": "POST", "path": "/v1/chat/completions", "description": "OpenAI 兼容：像普通模型一样发一次请求，返回 {has_person, violations}。"},
         ],
         "decide_batch": {
             "request": {
@@ -357,32 +385,28 @@ def help_document(model_name: str) -> dict:
             "request": {
                 "model": model_name,
                 "messages": [
-                    {"role": "system", "content": "你是调度助手，只能从 港口/账单 里选一个标签。"},
+                    {"role": "system", "content": "你是实时视频流助手，逐帧观察摄像头画面并判定监测行为。"},
                     {"role": "user", "content": [
                         {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
-                        {"type": "text", "text": "这个请求该给哪个部门？只回答标签。"},
+                        {"type": "text", "text": "任务名称：摔倒\n任务名称：挥手\n请只判定这些行为。"},
                     ]},
                 ],
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "route",
-                        "strict": True,
-                        "schema": {
-                            "type": "object",
-                            "properties": {"department": {"type": "string", "enum": ["港口", "账单"]}},
-                            "required": ["department"],
-                        },
-                    },
-                },
+                "tasks": ["摔倒", "挥手"],
             },
+            "internal": "对每个任务（含“是否有人”）并发发一次 prefill-only logprob 读取给 SGLang/vLLM，由服务端批处理，再拼装结果；用户无需关心。",
             "response": {
                 "object": "chat.completion",
-                "choices": [{"message": {"role": "assistant", "content": "{\"department\": \"账单\"}"}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 42, "completion_tokens": 0, "total_tokens": 42},
-                "telejev": {"probabilities": {"港口": 0.45, "账单": 0.55}, "chosen": "账单", "key": "department"},
+                "choices": [{"message": {"role": "assistant", "content": "{\"has_person\": 1, \"violations\": [\"挥手\"]}"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 300, "completion_tokens": 0, "total_tokens": 300},
+                "telejev": {
+                    "tasks": ["摔倒", "挥手"],
+                    "has_person_probabilities": {"A": 0.9, "B": 0.1},
+                    "violation_probabilities": {"摔倒": {"A": 0.2, "B": 0.8}, "挥手": {"A": 0.7, "B": 0.3}},
+                    "requests": 3,
+                    "concurrency": 3,
+                },
             },
-            "alternative": "也可用顶层 options 代替 response_format：{\"messages\": [...], \"options\": [\"yes\", \"no\"]} -> content 为 {\"choice\": \"...\"}。",
+            "task_source": "任务名优先取顶层 tasks，其次从 messages 里的“任务名称：X”解析，都没有则用内置默认集合。",
         },
         "notes": [
             "除 /v1/chat/completions 外，其余 POST 端点需要 body 中包含 state 与 criteria（或单条决策行）。",
