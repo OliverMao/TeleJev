@@ -3,7 +3,7 @@
 
 Uses the built-in stub scorer, so no GPU, model weights, or network are needed::
 
-    python examples/test_api.py
+    python tests/test_api.py
 """
 
 import json

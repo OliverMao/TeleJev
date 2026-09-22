@@ -7,7 +7,7 @@ Start an SGLang server first, e.g.::
 
 Then::
 
-    python examples/sglang_compare.py --base-url http://127.0.0.1:30000 --model Qwen/Qwen3.5-4B --image examples/fall.png
+    python benchmarks/sglang_compare.py --base-url http://127.0.0.1:30000 --model Qwen/Qwen3.5-4B --image demo/fall.png
 """
 
 import argparse
@@ -59,7 +59,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--base-url", default="http://127.0.0.1:30000")
     parser.add_argument("--model", required=True)
-    parser.add_argument("--image", default="examples/fall.png")
+    parser.add_argument("--image", default="demo/fall.png")
     parser.add_argument("--state", default="监控画面截图。")
     parser.add_argument("--max-new-tokens", type=int, default=None)
     parser.add_argument("--backend-name", default="sglang", help="label only: sglang or vllm")

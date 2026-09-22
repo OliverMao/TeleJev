@@ -94,8 +94,8 @@ python serve.py --backend sglang \     # 或 --backend vllm
 直接对比两者（对 SGLang / vLLM 都适用）：
 
 ```bash
-python examples/sglang_compare.py \
-  --base-url http://127.0.0.1:30000 --model Qwen/Qwen3.5-4B --image examples/fall.png
+python benchmarks/sglang_compare.py \
+  --base-url http://127.0.0.1:30000 --model Qwen/Qwen3.5-4B --image demo/fall.png
 ```
 
 默认监听 `http://127.0.0.1:8000`，可用 `--host` / `--port` 修改。
@@ -255,7 +255,7 @@ curl -X POST http://127.0.0.1:8000/decide-batch \
 
 ### 前端测试页
 
-`examples/index.html` 是单文件多任务测试页：勾选 打架 / 摔倒 / 挥手 / 捂胸口（“是否有人”始终判定），对同一张画面一次调用 `/decide-batch`，并把结果归一为统一格式：
+`demo/index.html` 是单文件多任务测试页：勾选 打架 / 摔倒 / 挥手 / 捂胸口（“是否有人”始终判定），对同一张画面一次调用 `/decide-batch`，并把结果归一为统一格式：
 
 ```json
 {"has_person": 0, "violations": ["打架", "挥手"]}
@@ -263,21 +263,21 @@ curl -X POST http://127.0.0.1:8000/decide-batch \
 
 勾选“同时跑完整自回归对比”后，还会调 `/generate`，把生成结果也归一成同一格式，并展示两边的逐判据一致率、耗时与 `tok/s`。可上传图像，或点“加载示例图”用页面内嵌的示例（不依赖外网）。
 
-`examples/replay.html` 是速度对比回放页：并行发起 direct 与 generate，direct 结果立即出现；generate 返回后，按它**真实生成耗时**用打字机把生成内容逐字回放（可选 1×/2×/4×/8× 回放速度，耗时数字始终是真实值），直观展示 direct 相对完整自回归的加速倍数。
+`demo/replay.html` 是速度对比回放页：并行发起 direct 与 generate，direct 结果立即出现；generate 返回后，按它**真实生成耗时**用打字机把生成内容逐字回放（可选 1×/2×/4×/8× 回放速度，耗时数字始终是真实值），直观展示 direct 相对完整自回归的加速倍数。
 
 ```bash
 python serve.py --fake          # 启动服务
-# 浏览器打开 examples/index.html
+# 浏览器打开 demo/index.html
 ```
 
 ### 自回归对比
 
-`examples/compare_generation.py` 用 `model.generate`（贪心，内部逐 token，**无手写解码循环**）对同一张图、同一组判据做完整自回归生成，并与 direct 的共享前缀批量（图像 prefill 1 次 + 判据前向 1 次）对比耗时与答案一致率。生成的**直接就是最终结构** `{"has_person": 0|1, "violations": ["摔倒", ...]}`，不是中间 yes/no 标签；`/generate` 响应里的 `output` 就是这个对象（`answers` 只是从它反推出来用于逐判据对比）。提示词集中在 `src/telejev/prompt.py`：system 为全局规则（APC 前缀），user 为图像在前、任务清单在后；判定只依据【最后一帧】，`violations` 必须逐字使用任务名。
+`benchmarks/compare_generation.py` 用 `model.generate`（贪心，内部逐 token，**无手写解码循环**）对同一张图、同一组判据做完整自回归生成，并与 direct 的共享前缀批量（图像 prefill 1 次 + 判据前向 1 次）对比耗时与答案一致率。生成的**直接就是最终结构** `{"has_person": 0|1, "violations": ["摔倒", ...]}`，不是中间 yes/no 标签；`/generate` 响应里的 `output` 就是这个对象（`answers` 只是从它反推出来用于逐判据对比）。提示词集中在 `src/telejev/prompt.py`：system 为全局规则（APC 前缀），user 为图像在前、任务清单在后；判定只依据【最后一帧】，`violations` 必须逐字使用任务名。
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python examples/compare_generation.py \
+CUDA_VISIBLE_DEVICES=0 python benchmarks/compare_generation.py \
   --model Qwen/Qwen3.5-4B \
-  --image examples/fall.png
+  --image demo/fall.png
 ```
 
 输出每个任务的 direct / generate 判定与是否一致，以及两边耗时：
@@ -313,10 +313,33 @@ print(decision["option_id"], decision["probabilities"])
 运行离线接口测试（不需要 GPU 或模型权重）：
 
 ```bash
-python examples/test_api.py
+python tests/test_api.py
 ```
 
 `examples/api_client.py` 是连接真实服务的可运行客户端示例。
+
+## 项目结构
+
+```
+src/telejev/          # 库（可 pip install；import telejev）
+  core.py             # 模型/图像加载、输入校验
+  prompt.py           # 全部提示词（全局规则 / 任务清单拼装）
+  direct.py           # Jev 式：单条读选项 logits
+  shared.py           # 共享前缀批量（本地）
+  batch.py            # /decide-batch 的本地实现
+  autoregressive.py   # 自回归基线（本地 model.generate）
+  sglang_backend.py   # SGLang / vLLM OpenAI 兼容后端
+  openai_compat.py    # /v1/chat/completions 封装（Jev 式结构化输出）
+  api.py              # HTTP 服务（/help /health /decide /decide-batch /generate ...）
+  cli.py              # 命令行 JSONL 打分
+run.py                # 入口：JSONL 打分
+serve.py              # 入口：HTTP 服务
+start.sh              # 本地启动示例
+demo/                 # 前端页面与示例图（index.html / replay.html / fall.png）
+benchmarks/           # 对比脚本（compare_generation.py / sglang_compare.py）
+examples/             # 调用示例（api_client.py）
+tests/                # 接口离线测试（test_api.py）
+```
 
 ## License
 

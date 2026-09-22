@@ -9,9 +9,9 @@ Both methods answer the same multi-task question about one image:
 
 Run on a single visible CUDA GPU, e.g.::
 
-    CUDA_VISIBLE_DEVICES=0 python examples/compare_generation.py \
+    CUDA_VISIBLE_DEVICES=0 python benchmarks/compare_generation.py \
       --model Qwen/Qwen3.5-4B \
-      --image examples/fall.png
+      --image demo/fall.png
 """
 
 import argparse
@@ -60,7 +60,7 @@ def direct_labels(results: list[dict]) -> list[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", default="Qwen/Qwen3.5-4B")
-    parser.add_argument("--image", default="examples/fall.png", help="Image path/URL/data URI ('' to skip)")
+    parser.add_argument("--image", default="demo/fall.png", help="Image path/URL/data URI ('' to skip)")
     parser.add_argument("--state", default="监控画面截图。")
     parser.add_argument("--max-tokens", type=int, default=4096, help="Direct-mode input token limit")
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Generation cap (default: 8*N+16)")

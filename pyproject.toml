@@ -24,6 +24,7 @@ dependencies = [
 
 [project.scripts]
 telejev = "telejev.cli:main"
+telejev-serve = "telejev.api:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
