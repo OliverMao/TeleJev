@@ -134,8 +134,10 @@ class DecisionService:
 
         jobs = [PERSON_INSTRUCTION] + [task_instruction(name) for name in tasks]
         workers = min(len(jobs), 32)
+        started = time.perf_counter()
         with ThreadPoolExecutor(max_workers=workers) as pool:
             outcomes = list(pool.map(judge, jobs))
+        total_seconds = time.perf_counter() - started
 
         output = {
             "has_person": 1 if hit(outcomes[0]) else 0,
@@ -150,6 +152,8 @@ class DecisionService:
             "requests": len(jobs),
             "concurrency": workers,
             "prompt_tokens": sum(int(result.get("prompt_tokens", 0) or 0) for result in outcomes),
+            "total_seconds": total_seconds,
+            "sum_request_seconds": sum(float(result.get("seconds", 0.0) or 0.0) for result in outcomes),
         }
         return build_completion(self.model_name, output, detail)
 

@@ -276,6 +276,8 @@ curl -X POST http://127.0.0.1:8000/decide-batch \
 
 `demo/replay.html` 是速度对比回放页：并行发起 direct 与 generate，direct 结果立即出现；generate 返回后，按它**真实生成耗时**用打字机把生成内容逐字回放（可选 1×/2×/4×/8× 回放速度，耗时数字始终是真实值），直观展示 direct 相对完整自回归的加速倍数。
 
+`demo/completions.html` 是 `/v1/chat/completions` 测试页：自己填 system/user 提示词（预fil 了一套监控任务清单）、可选上传或内嵌示例图像，调用后展示 `{"has_person", "violations"}`、各任务 A/B 概率、请求数/并发/耗时与原始响应。需以 `--backend sglang|vllm` 启动。
+
 ```bash
 python serve.py --fake          # 启动服务
 # 浏览器打开 demo/index.html
