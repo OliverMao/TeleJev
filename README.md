@@ -214,6 +214,7 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
 - `violations` 里的名称与任务名逐字一致，便于前端按名点亮卡片。
 - `completion_tokens` 为 0（内部不生成 token）；概率放在额外字段 `telejev`，OpenAI 客户端会自动忽略。
 - 需 `--backend sglang|vllm`（复用服务端 tokenizer / 前缀缓存，并让并发请求在服务端成一个 batch）。
+- **前缀缓存（APC）**：请求里 `system + 图像 + 任务清单` 在前、逐任务指令拼在最后，N+1 次请求共享同一段前缀；服务端 APC/Radix Cache 只编码一次图像。内部先用“是否有人”那次请求预热后缀，再并发其余任务。需服务端开启前缀缓存（SGLang 默认开；vLLM 加 `--enable-prefix-caching`），多图还需放开上限（vLLM `--limit-mm-per-prompt image=20`）。
 
 ### 批量判定（多任务）
 

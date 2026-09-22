@@ -117,7 +117,9 @@ class DecisionService:
             raise ValueError("The OpenAI-compatible Jev endpoint requires --backend sglang or vllm")
         from concurrent.futures import ThreadPoolExecutor
 
-        from .openai_compat import PERSON_INSTRUCTION, build_completion, extract_tasks, task_instruction
+        from .openai_compat import (
+            PERSON_INSTRUCTION, build_completion, extract_tasks, task_instruction, with_instruction,
+        )
 
         messages = body.get("messages")
         if not isinstance(messages, list) or not messages:
@@ -125,18 +127,22 @@ class DecisionService:
         tasks = extract_tasks(body)
 
         def judge(instruction: str) -> dict:
-            request_messages = messages + [{"role": "user", "content": instruction}]
-            return self._score_labels(request_messages, ["A", "B"])
+            return self._score_labels(with_instruction(messages, instruction), ["A", "B"])
 
         def hit(result: dict) -> bool:
             probabilities = result.get("probabilities", {})
             return probabilities.get("A", 0.0) >= probabilities.get("B", 0.0)
 
-        jobs = [PERSON_INSTRUCTION] + [task_instruction(name) for name in tasks]
-        workers = min(len(jobs), 32)
         started = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            outcomes = list(pool.map(judge, jobs))
+        # Warm the shared prefix (system + images + user text) once, then fan the
+        # task reads out concurrently so the server batches them (and reuses the
+        # prefix cache instead of re-encoding every image per task).
+        outcomes = [judge(PERSON_INSTRUCTION)]
+        task_instructions = [task_instruction(name) for name in tasks]
+        workers = min(len(task_instructions), 32) if task_instructions else 1
+        if task_instructions:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                outcomes += list(pool.map(judge, task_instructions))
         total_seconds = time.perf_counter() - started
 
         output = {
@@ -149,8 +155,9 @@ class DecisionService:
             "violation_probabilities": {
                 name: outcomes[index + 1].get("probabilities", {}) for index, name in enumerate(tasks)
             },
-            "requests": len(jobs),
+            "requests": len(outcomes),
             "concurrency": workers,
+            "prefix_warmup": True,
             "prompt_tokens": sum(int(result.get("prompt_tokens", 0) or 0) for result in outcomes),
             "total_seconds": total_seconds,
             "sum_request_seconds": sum(float(result.get("seconds", 0.0) or 0.0) for result in outcomes),
@@ -411,6 +418,7 @@ def help_document(model_name: str) -> dict:
                 },
             },
             "task_source": "任务名优先取顶层 tasks，其次从 messages 里的“任务名称：X”解析，都没有则用内置默认集合。",
+            "prefix_cache": "system + 图像 + 任务清单在前，逐任务指令拼在最后；服务端 APC/Radix Cache 只编码一次共享前缀。SGLang 默认开，vLLM 需 --enable-prefix-caching（多图还需 --limit-mm-per-prompt image=20）；内部先用“是否有人”预热后缀，再并发其余任务。",
         },
         "notes": [
             "除 /v1/chat/completions 外，其余 POST 端点需要 body 中包含 state 与 criteria（或单条决策行）。",

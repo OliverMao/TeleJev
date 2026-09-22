@@ -79,6 +79,26 @@ def extract_tasks(body: dict) -> list[str]:
     return list(dict.fromkeys(found)) or list(DEFAULT_TASKS)
 
 
+def with_instruction(messages: list, instruction: str) -> list:
+    """Append an instruction to the last user turn (keeps a single user message).
+
+    Appending to the same turn keeps ``system + images + user text`` as a stable
+    prefix so the server's prefix cache is reused across the per-task requests.
+    """
+    if not messages:
+        return [{"role": "user", "content": instruction}]
+    out = [dict(message) for message in messages]
+    last = out[-1]
+    content = last.get("content")
+    if isinstance(content, str):
+        last["content"] = content + "\n\n" + instruction
+    elif isinstance(content, list):
+        last["content"] = content + [{"type": "text", "text": "\n\n" + instruction}]
+    else:
+        out.append({"role": "user", "content": instruction})
+    return out
+
+
 def build_completion(model: str, output: dict, detail: dict) -> dict:
     """Wrap the assembled decision in an OpenAI chat.completion envelope."""
     content = json.dumps(output, ensure_ascii=False)
