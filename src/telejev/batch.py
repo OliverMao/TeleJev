@@ -14,6 +14,7 @@ import time
 
 from .core import direct_messages, load_image, softmax, validate_row
 from .direct import PROMPT_VERSION, _apply_chat_template, encode_prompt
+from .prompt import task_standard
 from .shared import _state_prefix, _suffix_layout
 
 
@@ -196,6 +197,7 @@ def score_batch(model, tokenizer, metadata, state, image_ref, criteria, max_toke
             "state": state,
             "question": criterion["question"],
             "options": criterion["options"],
+            "standard": task_standard(criterion),
         }
         validate_row(row)
         rows.append(row)

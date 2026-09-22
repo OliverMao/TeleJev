@@ -45,7 +45,9 @@ def validate_row(row: dict) -> None:
 
 def direct_messages(row: dict) -> list[dict]:
     validate_row(row)
-    payload = build_decision_payload(row["state"], row["question"], row["options"], LETTERS)
+    payload = build_decision_payload(
+        row["state"], row["question"], row["options"], LETTERS, row.get("standard")
+    )
     return [
         {"role": "system", "content": DIRECT_SYSTEM},
         {"role": "user", "content": payload},

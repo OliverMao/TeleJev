@@ -25,7 +25,7 @@ from pathlib import Path
 
 from .autoregressive import parse_output
 from .core import LETTERS, direct_messages
-from .prompt import DIRECT_SYSTEM, GENERATION_SYSTEM, build_generation_text
+from .prompt import DIRECT_SYSTEM, GENERATION_SYSTEM, build_generation_text, task_standard
 
 
 class SGLangError(RuntimeError):
@@ -95,9 +95,11 @@ class SGLangBackend:
         ]
 
     # ---- Jev-style readout -------------------------------------------------
-    def score_options(self, state, question: str, options: list[dict], image: str | None = None):
+    def score_options(self, state, question: str, options: list[dict], image: str | None = None, standard: str | None = None):
         """Prefill-only readout of option-letter logprobs for one decision."""
-        messages = direct_messages({"id": "x", "state": state, "question": question, "options": options})
+        messages = direct_messages(
+            {"id": "x", "state": state, "question": question, "options": options, "standard": standard}
+        )
         payload = {
             "model": self.model,
             "messages": [
@@ -138,7 +140,7 @@ class SGLangBackend:
         }
 
     def score_row(self, row: dict) -> dict:
-        scored = self.score_options(row["state"], row["question"], row["options"], row.get("image"))
+        scored = self.score_options(row["state"], row["question"], row["options"], row.get("image"), row.get("standard"))
         option_ids = [option["id"] for option in row["options"]]
         probabilities = [scored["probabilities"].get(letter, 0.0) for letter in scored["letters"]]
         return {
@@ -166,7 +168,9 @@ class SGLangBackend:
         workers = min(len(criteria), 32)
         with ThreadPoolExecutor(max_workers=workers) as pool:
             scored = list(pool.map(
-                lambda criterion: self.score_options(state, criterion["question"], criterion["options"], image),
+                lambda criterion: self.score_options(
+                    state, criterion["question"], criterion["options"], image, task_standard(criterion)
+                ),
                 criteria,
             ))
         total_seconds = time.perf_counter() - started

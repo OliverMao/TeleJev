@@ -17,21 +17,24 @@ from __future__ import annotations
 
 import json
 
-# Jev 式读 logits 的 system 提示：只回一个大写字母。
-DIRECT_SYSTEM = (
-    "Apply the supplied criterion to the supplied evidence. Choose exactly one listed option. "
-    "Respond with only its uppercase letter, with no explanation or reasoning."
-)
-
-# 自回归基线的 system 提示：全局通用规则，所有请求共用（APC 前缀）。
-GENERATION_SYSTEM = """你是一名实时视频流助手，逐帧观察连续的摄像头画面，并按要求判定当前是否存在指定的监测行为。
+# 两条路径共用的全局规则（system 前缀，APC 友好，所有请求一致）。
+GLOBAL_RULES = """你是一名实时视频流助手，逐帧观察连续的摄像头画面，并按要求判定当前是否存在指定的监测行为。
 
 【最重要的判定原则】
-你输出的 violations 必须且只能反映【最后一帧】的状态。例如前 10 帧出现过某行为、后 10 帧已恢复正常，则不得报告该行为。
+你输出的结论必须且只能反映【最后一帧】的状态。例如前 10 帧出现过某行为、后 10 帧已恢复正常，则不得报告该行为。
 - 历史帧（最后一帧之前的所有帧）仅作为连续运动趋势的辅助参考，用于判断动作是否仍在持续、是否刚刚发生、是否已经结束。
-- 如果某个行为在历史帧出现过，但在最后一帧已经结束或恢复常态，则该行为【不得】出现在 violations 中。
-- 只有当某个行为在【最后一帧当下仍在发生或仍然保持该姿态】时，才计入 violations。
-- 不要累计、沿用、记忆历史帧中已结束的行为；不要做“曾经发生过就报”的统计。
+- 如果某个行为在历史帧出现过，但在最后一帧已经结束或恢复常态，则该行为【不得】计入结果。
+- 只有当某个行为在【最后一帧当下仍在发生或仍然保持该姿态】时，才计入。
+- 不要累计、沿用、记忆历史帧中已结束的行为；不要做“曾经发生过就报”的统计。"""
+
+# Jev 式读 logits 的 system：共用全局规则，输出契约是“一个大写字母”。
+DIRECT_SYSTEM = GLOBAL_RULES + """
+
+【输出格式】
+只输出所选选项的【一个大写字母】（A/B/C...），不要任何解释或推理，不要开启思考模式。"""
+
+# 自回归基线的 system：共用全局规则，输出契约是最终 JSON 对象。
+GENERATION_SYSTEM = GLOBAL_RULES + """
 
 【输出格式】
 严格输出如下 JSON，不要添加任何多余文本或解释，不要开启思考模式：
@@ -39,8 +42,7 @@ GENERATION_SYSTEM = """你是一名实时视频流助手，逐帧观察连续的
 
 - has_person：最后一帧画面中是否有人（1 有 / 0 无 / -1 无法判断）。
 - violations：最后一帧当下仍在发生的监测行为的【名称】，必须【逐字】使用用户在任务清单中给出的名称。
-- 如果最后一帧没有任何清单中的行为，violations 必须为空数组 []。
-"""
+- 如果最后一帧没有任何清单中的行为，violations 必须为空数组 []。"""
 
 # 内置默认任务的判定标准（当清单里出现这些名称且未提供优化描述时附加，提高准确率）。
 BUILTIN_RULES: dict[str, str] = {
@@ -72,19 +74,38 @@ def behavior_labels(criteria: list[dict]) -> list[str]:
     ]
 
 
-def build_decision_payload(state, question: str, options: list[dict], letters: str) -> str:
-    """Jev 式决策的 user 轮 JSON：evidence + criterion + 带字母的 options。"""
-    return json.dumps(
-        {
-            "evidence": state,
-            "criterion": question,
-            "options": [
-                {"letter": letters[index], "description": option["description"]}
-                for index, option in enumerate(options)
-            ],
-        },
-        ensure_ascii=False,
-    )
+def task_standard(criterion: dict) -> str:
+    """单个任务的判定标准：description_opt > 内置规则 > 原始描述，并附带排除项。"""
+    name = criterion.get("label") or criterion.get("id")
+    desc = str(criterion.get("description") or criterion.get("question") or "").strip()
+    desc_opt = str(criterion.get("description_opt") or "").strip()
+    if desc_opt:
+        standard = desc_opt
+    elif name in BUILTIN_RULES:
+        standard = BUILTIN_RULES[name]
+    else:
+        standard = desc
+    exclusions = criterion.get("exclusions_opt") or []
+    if isinstance(exclusions, list):
+        exclusions = [str(item).strip() for item in exclusions if str(item).strip()]
+        if exclusions:
+            standard = (standard + " 排除：" + "；".join(exclusions)).strip()
+    return standard
+
+
+def build_decision_payload(state, question: str, options: list[dict], letters: str, standard: str | None = None) -> str:
+    """Jev 式决策的 user 轮 JSON：evidence + criterion(+标准) + 带字母的 options。"""
+    payload = {
+        "evidence": state,
+        "criterion": question,
+        "options": [
+            {"letter": letters[index], "description": option["description"]}
+            for index, option in enumerate(options)
+        ],
+    }
+    if standard:
+        payload["criterion_standard"] = standard
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def build_task_block(criteria: list[dict]) -> str:
@@ -102,26 +123,14 @@ def build_task_block(criteria: list[dict]) -> str:
         name = str(task.get("label") or task.get("id") or "").strip()
         if not name:
             continue
-        # 判定标准的注入优先级：description_opt > 内置规则 > 原始描述
-        desc = str(task.get("description") or task.get("question") or "").strip()
-        desc_opt = str(task.get("description_opt") or "").strip()
-        exclusions = task.get("exclusions_opt") or []
-        if not isinstance(exclusions, list):
-            exclusions = []
-        exclusions = [str(item).strip() for item in exclusions if str(item).strip()]
         period = str(task.get("carePeriod") or "").strip()
         level = str(task.get("alertLevel") or "").strip()
         meta = " / ".join(part for part in (period, level) if part)
+        standard = task_standard(task)
 
         lines.append(f"{index}. 任务名称：{name}" + (f"（{meta}）" if meta else ""))
-        if desc_opt:
-            lines.append(f"   判定标准：{desc_opt}")
-        elif name in BUILTIN_RULES:
-            lines.append(f"   判定标准：{BUILTIN_RULES[name]}")
-        elif desc:
-            lines.append(f"   判定标准：{desc}")
-        if exclusions:
-            lines.append("   排除项（以下情形不应计入本任务）：" + "；".join(exclusions))
+        if standard:
+            lines.append(f"   判定标准：{standard}")
 
     lines += [
         "",

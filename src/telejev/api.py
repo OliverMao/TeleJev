@@ -31,6 +31,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .core import LETTERS, validate_row
+from .prompt import task_standard
 
 ROW_KEYS = ("id", "state", "question", "options", "image")
 
@@ -75,6 +76,8 @@ class DecisionService:
     def decide(self, body: dict) -> dict:
         row = {key: body[key] for key in ROW_KEYS if key in body}
         row.setdefault("id", "request")
+        if body.get("label") or body.get("description_opt") or body.get("description"):
+            row["standard"] = task_standard(body)
         validate_row(row)
         with self._lock:
             raw = self._score(row)
