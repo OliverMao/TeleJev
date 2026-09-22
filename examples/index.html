@@ -172,14 +172,21 @@ function timingCard(label, value) {
 }
 
 function renderTiming(timing) {
-  $("timing").innerHTML = [
-    timingCard("接口 → 推理完成", seconds(timing.total_seconds)),
-    timingCard("图像解码", seconds(timing.image_seconds)),
-    timingCard("prompt 编码", seconds(timing.encode_seconds)),
-    timingCard("图像 prefill", seconds(timing.prefill_seconds)),
-    timingCard("判据前向", seconds(timing.suffix_seconds)),
-    timingCard("任务数", timing.batch_size ?? "?"),
-  ].join("");
+  const cards = [timingCard("接口 → 推理完成", seconds(timing.total_seconds))];
+  if (timing.batched) {
+    cards.push(timingCard("判据请求数", timing.requests ?? "?"));
+    cards.push(timingCard("并发度", timing.concurrency ?? "?"));
+    cards.push(timingCard("顺序总和", seconds(timing.sum_request_seconds)));
+    cards.push(timingCard("batch step", timing.forward_passes ?? "?"));
+  } else {
+    cards.push(timingCard("图像解码", seconds(timing.image_seconds)));
+    cards.push(timingCard("prompt 编码", seconds(timing.encode_seconds)));
+    cards.push(timingCard("图像 prefill", seconds(timing.prefill_seconds)));
+    cards.push(timingCard("判据前向", seconds(timing.suffix_seconds)));
+  }
+  if (timing.backend) cards.push(timingCard("后端", timing.backend));
+  cards.push(timingCard("任务数", timing.batch_size ?? "?"));
+  $("timing").innerHTML = cards.join("");
 }
 
 function renderCard(criterion, decision) {
@@ -258,11 +265,14 @@ function renderCompare(criteria, direct, generation, output) {
   }).join("");
   const directTotal = direct.timing?.inference_seconds ?? direct.timing?.total_seconds;
   const speed = (generation.generate_seconds && directTotal) ? generation.generate_seconds / directTotal : null;
+  const directBatched = direct.timing?.batched;
+  const directRequests = direct.timing?.requests;
   $("compare").innerHTML = `
     <h3 style="font-size:13px;margin:18px 0 6px">自回归对比（model.generate）</h3>
     <div class="timing">
       ${timingCard("Jev 总耗时", seconds(directTotal))}
-      ${timingCard("Jev 前向次数", direct.timing?.forward_passes ?? 2)}
+      ${timingCard("Jev 前向/请求数", direct.timing?.forward_passes ?? 2)}
+      ${directBatched ? timingCard("Jev 请求/并发", `${directRequests} / ${direct.timing.concurrency}`) : ""}
       ${timingCard("generate 耗时", seconds(generation.generate_seconds))}
       ${timingCard("generate 前向次数", generation.forward_passes ?? (1 + (generation.new_tokens || 0)))}
       ${timingCard("生成 tokens", generation.new_tokens ?? "?")}

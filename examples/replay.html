@@ -92,7 +92,7 @@
     <div class="panels">
       <div class="panel direct">
         <h3>Jev · 2 次前向</h3>
-        <div class="hint">共享前缀批量：图像 prefill 1 次 + 判据前向 1 次（共 2 次前向）</div>
+        <div class="hint">共享前缀批量（本地 2 次前向；SGLang/vLLM 为并发批处理）</div>
         <div class="big ok" id="directTime">—</div>
         <pre id="directOut"></pre>
       </div>
@@ -267,13 +267,16 @@ async function run() {
   const perToken = newTokens ? (generateSeconds / newTokens) * 1000 : null;
   const directForward = directResult.timing?.forward_passes ?? 2;
   const genForward = genResult.forward_passes ?? (1 + newTokens);
+  const directBatched = directResult.timing?.batched;
+  const directRequests = directResult.timing?.requests;
   $("summary").innerHTML = `
       <div class="speed">${speedup ? speedup.toFixed(1) + "×" : "?"}</div>
       <div class="muted">generate 耗时 / Jev 耗时（回放速度 ${speed}×，耗时数字仍是真实值）</div>
       <div style="margin-top:10px">
         <span class="kv"><span class="k">Jev</span><span class="v">${directTotal != null ? directTotal.toFixed(4) : "?"} s</span></span>
         <span class="kv"><span class="k">generate</span><span class="v">${generateSeconds.toFixed(4)} s</span></span>
-        <span class="kv"><span class="k">前向次数</span><span class="v">Jev ${directForward} / generate ${genForward}</span></span>
+        <span class="kv"><span class="k">前向/请求次数</span><span class="v">Jev ${directForward} / generate ${genForward}</span></span>
+        ${directBatched ? `<span class="kv"><span class="k">请求/并发</span><span class="v">${directRequests} / ${directResult.timing.concurrency}</span></span>` : ""}
         <span class="kv"><span class="k">生成 tokens</span><span class="v">${newTokens}</span></span>
         <span class="kv"><span class="k">每 token</span><span class="v">${perToken ? perToken.toFixed(1) + " ms" : "?"}</span></span>
         <span class="kv"><span class="k">tok/s</span><span class="v">${genResult.tokens_per_second ? genResult.tokens_per_second.toFixed(1) : "?"}</span></span>
