@@ -15,32 +15,69 @@ from .core import load_image
 from .direct import _apply_chat_template
 
 SYSTEM_PROMPT = (
-    "You are a surveillance analyst. For every criterion, decide whether the "
-    "attached image contains that behaviour. Answer for each criterion, in the "
-    "given order, with only a JSON array of \"yes\"/\"no\" strings and no "
-    "explanation or reasoning."
+    "You are a surveillance analyst. Decide from the attached image whether any "
+    "person is present and which of the listed behaviours are present. Answer "
+    "with only a JSON object, no explanation, no markdown."
 )
 
-_ANSWER_RE = re.compile(r"\b(yes|no)\b", re.IGNORECASE)
+
+def _behavior_labels(criteria: list[dict]) -> list[str]:
+    return [criterion.get("label") or criterion.get("id") for criterion in criteria if criterion.get("id") != "person"]
+
+
+def build_prompt_text(state, criteria) -> str:
+    """Prompt text asking for the final {has_person, violations} object."""
+    lines = ["Evidence: " + json.dumps(state, ensure_ascii=False), "Decide from the image:"]
+    for criterion in criteria:
+        label = criterion.get("label") or criterion.get("id")
+        field = "has_person (0 or 1)" if criterion.get("id") == "person" else f'violation "{label}"'
+        lines.append(f"- {field}: {criterion['question']}")
+    allowed = ", ".join(json.dumps(label, ensure_ascii=False) for label in _behavior_labels(criteria))
+    lines.append(f"Allowed violations: [{allowed}]")
+    lines.append(
+        'Respond with ONLY a JSON object exactly like {"has_person": 0, "violations": ["..."]}. '
+        "has_person=1 if any person is present; list only the violation names that are present."
+    )
+    return "\n".join(lines)
 
 
 def build_messages(state, criteria, has_image: bool) -> list[dict]:
-    """One prompt that asks the model to answer every criterion in order."""
-    listing = [
-        {"id": criterion.get("id", f"criterion-{index}"), "criterion": criterion["question"]}
-        for index, criterion in enumerate(criteria)
-    ]
-    text = (
-        "Evidence: " + json.dumps(state, ensure_ascii=False) + "\n"
-        "Criteria (answer in this exact order):\n"
-        + json.dumps(listing, ensure_ascii=False)
-        + f'\nReturn a JSON array of {len(criteria)} strings, each "yes" or "no".'
-    )
+    """One prompt that asks for the final {has_person, violations} object."""
+    text = build_prompt_text(state, criteria)
     content = [{"type": "image"}, {"type": "text", "text": text}] if has_image else text
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": content},
     ]
+
+
+def parse_output(text: str, criteria: list[dict]) -> tuple[dict, list[str]]:
+    """Parse the generated JSON into {has_person, violations} plus per-criterion yes/no."""
+    has_person = 0
+    violations: list[str] = []
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            try:
+                has_person = 1 if int(data.get("has_person", 0)) else 0
+            except (TypeError, ValueError):
+                has_person = 0
+            allowed = _behavior_labels(criteria)
+            raw = data.get("violations", [])
+            if isinstance(raw, list):
+                violations = [item for item in raw if item in allowed]
+    output = {"has_person": has_person, "violations": violations}
+    answers = []
+    for criterion in criteria:
+        if criterion.get("id") == "person":
+            answers.append("yes" if has_person else "no")
+        else:
+            answers.append("yes" if (criterion.get("label") or criterion.get("id")) in violations else "no")
+    return output, answers
 
 
 def generate_answers(model, tokenizer, processor, state, criteria, image_ref=None, max_new_tokens=None):
@@ -90,9 +127,10 @@ def generate_answers(model, tokenizer, processor, state, criteria, image_ref=Non
     new_ids = output[0, prompt_tokens:]
     new_tokens = int(new_ids.shape[-1])
     generated = tokenizer.decode(new_ids, skip_special_tokens=True)
-    answers = [match.group(1).lower() for match in _ANSWER_RE.finditer(generated)][: len(criteria)]
+    parsed, answers = parse_output(generated, criteria)
     return {
         "text": generated,
+        "output": parsed,
         "answers": answers,
         "prompt_tokens": prompt_tokens,
         "new_tokens": new_tokens,

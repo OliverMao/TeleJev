@@ -212,15 +212,22 @@ def fake_generate():
         if not isinstance(criteria, list) or not criteria:
             raise ValueError("criteria must be a nonempty list")
         answers = []
+        output = {"has_person": 0, "violations": []}
         for criterion in criteria:
             logits = [len(option["description"]) % 7 + index for index, option in enumerate(criterion["options"])]
             best = max(range(len(logits)), key=logits.__getitem__)
-            answers.append(criterion["options"][best]["id"])
-        text = "[" + ", ".join(f'"{answer}"' for answer in answers) + "]"
+            answer = criterion["options"][best]["id"]
+            answers.append(answer)
+            if criterion.get("id") == "person":
+                output["has_person"] = 1 if answer == "yes" else 0
+            elif answer == "yes":
+                output["violations"].append(criterion.get("label") or criterion.get("id"))
+        text = json.dumps(output, ensure_ascii=False)
         generate_seconds = 0.01 * len(criteria)
         new_tokens = 2 * len(criteria)
         return {
             "text": text,
+            "output": output,
             "answers": answers,
             "prompt_tokens": 42,
             "new_tokens": new_tokens,

@@ -233,7 +233,7 @@ python serve.py --fake          # 启动服务
 
 ### 自回归对比
 
-`examples/compare_generation.py` 用 `model.generate`（贪心，内部逐 token，**无手写解码循环**）对同一张图、同一组判据做完整自回归生成，并与 direct 的共享前缀批量（图像 prefill 1 次 + 判据前向 1 次）对比耗时与答案一致率。
+`examples/compare_generation.py` 用 `model.generate`（贪心，内部逐 token，**无手写解码循环**）对同一张图、同一组判据做完整自回归生成，并与 direct 的共享前缀批量（图像 prefill 1 次 + 判据前向 1 次）对比耗时与答案一致率。生成的**直接就是最终结构** `{"has_person": 0|1, "violations": ["摔倒", ...]}`，不是中间 yes/no 标签；`/generate` 响应里的 `output` 就是这个对象（`answers` 只是从它反推出来用于逐判据对比）。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python examples/compare_generation.py \

@@ -113,8 +113,9 @@ def main() -> None:
         # 4. Full autoregressive generation returns answers and timing.
         gen = post(base, "/generate", {"state": BATCH["state"], "image": TINY_PNG, "criteria": BATCH["criteria"]})
         assert len(gen["answers"]) == len(BATCH["criteria"])
-        for key in ("text", "new_tokens", "generate_seconds", "total_seconds", "request_seconds", "forward_passes"):
+        for key in ("text", "output", "new_tokens", "generate_seconds", "total_seconds", "request_seconds", "forward_passes"):
             assert key in gen, key
+        assert set(gen["output"]) == {"has_person", "violations"}
         assert gen["forward_passes"] == 1 + gen["new_tokens"]
 
         # 5. Health probe reports the model name.

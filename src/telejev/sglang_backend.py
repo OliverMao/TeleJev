@@ -23,7 +23,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .autoregressive import SYSTEM_PROMPT, _ANSWER_RE
+from .autoregressive import SYSTEM_PROMPT, build_prompt_text, parse_output
 from .core import LETTERS, direct_messages
 
 DEFAULT_SYSTEM = (
@@ -220,23 +220,14 @@ class SGLangBackend:
     def generate(self, state, image, criteria, max_new_tokens=None):
         if not isinstance(criteria, list) or not criteria:
             raise ValueError("criteria must be a nonempty list")
-        listing = [
-            {"id": c.get("id", f"criterion-{i}"), "criterion": c["question"]}
-            for i, c in enumerate(criteria)
-        ]
-        text = (
-            "Evidence: " + json.dumps(state, ensure_ascii=False) + "\n"
-            "Criteria (answer in this exact order):\n"
-            + json.dumps(listing, ensure_ascii=False)
-            + f'\nReturn a JSON array of {len(criteria)} strings, each "yes" or "no".'
-        )
+        text = build_prompt_text(state, criteria)
         payload = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": self._content(text, image)},
             ],
-            "max_tokens": max_new_tokens or (8 * len(criteria) + 16),
+            "max_tokens": max_new_tokens or (16 * len(criteria) + 32),
             "temperature": 0.0,
             "chat_template_kwargs": {"enable_thinking": False},
         }
@@ -245,9 +236,10 @@ class SGLangBackend:
         generated = choice["message"].get("content", "") or ""
         usage = body.get("usage", {}) or {}
         new_tokens = int(usage.get("completion_tokens", 0) or 0)
-        answers = [m.group(1).lower() for m in _ANSWER_RE.finditer(generated)][: len(criteria)]
+        parsed, answers = parse_output(generated, criteria)
         return {
             "text": generated,
+            "output": parsed,
             "answers": answers,
             "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
             "new_tokens": new_tokens,

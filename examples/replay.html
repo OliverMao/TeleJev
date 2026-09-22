@@ -165,7 +165,7 @@ function toOutput(criteria, answers) {
   return { has_person, violations };
 }
 function requestBody(criteria) {
-  const body = { state: STATE, criteria: criteria.map((c) => ({ id: c.id, question: c.question, options: c.options })) };
+  const body = { state: STATE, criteria: criteria.map((c) => ({ id: c.id, label: c.label, question: c.question, options: c.options })) };
   if (imageData) body.image = imageData;
   return body;
 }
@@ -246,7 +246,7 @@ async function run() {
     await typewrite($("genText"), data.text || "", replayMs, (ratio) => {
       $("genBar").style.width = (ratio * 100).toFixed(1) + "%";
     });
-    $("genOut").textContent = JSON.stringify(toOutput(criteria, data.answers || []), null, 2);
+    $("genOut").textContent = JSON.stringify(data.output || toOutput(criteria, data.answers || []), null, 2);
   });
 
   const settled = await Promise.allSettled([directTask, genTask]);

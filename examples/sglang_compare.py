@@ -31,10 +31,11 @@ def build_criteria() -> list[dict]:
     return [
         {
             "id": key,
+            "label": label,
             "question": question,
             "options": [{"id": "yes", "description": yes}, {"id": "no", "description": no}],
         }
-        for key, _, question, yes, no in TASKS
+        for key, label, question, yes, no in TASKS
     ]
 
 
@@ -91,7 +92,8 @@ def main() -> None:
     print(f"  new tokens    : {generation['new_tokens']}")
     print(f"  generate      : {generation['generate_seconds']:.4f} s")
     print(f"  total         : {generation['total_seconds']:.4f} s")
-    print(f"  output        : {to_output(generated)}")
+    print(f"  text          : {generation['text']!r}")
+    print(f"  output        : {generation.get('output')}")
 
     if direct_timing["total_seconds"] > 0 and generation["generate_seconds"] > 0:
         print(f"\ngenerate / Jev: {generation['generate_seconds'] / direct_timing['total_seconds']:.1f}x")

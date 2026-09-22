@@ -225,7 +225,7 @@ async function postJson(path, body) {
   return { response, data, text };
 }
 function requestBody(criteria) {
-  const body = { state: STATE, criteria: criteria.map((c) => ({ id: c.id, question: c.question, options: c.options })) };
+  const body = { state: STATE, criteria: criteria.map((c) => ({ id: c.id, label: c.label, question: c.question, options: c.options })) };
   if (imageData) body.image = imageData;
   return body;
 }
@@ -295,7 +295,7 @@ async function runGeneration(criteria, direct) {
       return;
     }
     if (!response.ok) throw new Error(`HTTP ${response.status} ${data?.error?.message || text.slice(0, 300)}`);
-    renderCompare(criteria, direct, data, toOutput(criteria, data.answers || []));
+    renderCompare(criteria, direct, data, data.output || toOutput(criteria, data.answers || []));
   } catch (error) {
     $("compare").innerHTML = `<div class="meta">自回归对比失败：${escapeAttr(error.message)}</div>`;
   }

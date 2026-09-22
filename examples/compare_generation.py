@@ -37,13 +37,14 @@ def build_criteria() -> list[dict]:
     return [
         {
             "id": key,
+            "label": label,
             "question": f"画面中是否有人{verb}？",
             "options": [
                 {"id": "yes", "description": f"画面中有人{verb}。"},
                 {"id": "no", "description": f"画面中没有人{verb}。"},
             ],
         }
-        for key, _, verb in TASKS
+        for key, label, verb in TASKS
     ]
 
 
