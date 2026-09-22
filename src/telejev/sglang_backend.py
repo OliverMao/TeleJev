@@ -16,9 +16,11 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .autoregressive import SYSTEM_PROMPT, _ANSWER_RE
@@ -68,6 +70,7 @@ class SGLangBackend:
         self.timeout = timeout
         self.backend_name = backend_name
         self.requests = 0
+        self._count_lock = threading.Lock()
 
     def _post(self, path: str, payload: dict) -> tuple[dict, float]:
         data = json.dumps(payload).encode("utf-8")
@@ -83,7 +86,8 @@ class SGLangBackend:
             detail = error.read().decode("utf-8", "replace")[:500]
             raise SGLangError(f"SGLang HTTP {error.code}: {detail}") from error
         elapsed = time.perf_counter() - started
-        self.requests += 1
+        with self._count_lock:
+            self.requests += 1
         return body, elapsed
 
     def _content(self, text: str, image: str | None):
@@ -154,47 +158,58 @@ class SGLangBackend:
         }
 
     def score_batch(self, state, image, criteria, **_ignored):
-        """Score many criteria, reusing SGLang's Radix Cache for the shared prefix."""
+        """Score many criteria by firing their requests concurrently.
+
+        The OpenAI-compatible server (vLLM/SGLang) then continuous-batches them on
+        the GPU, so the criteria share one step instead of running one after
+        another; the shared image/state prefix is reused by its prefix cache.
+        """
         if not isinstance(criteria, list) or not criteria:
             raise ValueError("criteria must be a nonempty list")
         started = time.perf_counter()
+        workers = min(len(criteria), 32)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            scored = list(pool.map(
+                lambda criterion: self.score_options(state, criterion["question"], criterion["options"], image),
+                criteria,
+            ))
+        total_seconds = time.perf_counter() - started
         results = []
-        first_seconds = 0.0
-        rest_seconds = 0.0
         input_tokens = 0
-        for index, criterion in enumerate(criteria):
-            scored = self.score_options(state, criterion["question"], criterion["options"], image)
+        request_seconds = []
+        for index, (criterion, item) in enumerate(zip(criteria, scored)):
             results.append(
                 {
                     "id": criterion.get("id") or f"criterion-{index}",
                     "option_ids": [option["id"] for option in criterion["options"]],
-                    "probabilities": [scored["probabilities"].get(letter, 0.0) for letter in scored["letters"]],
-                    "option_logits": [scored["logprobs"].get(letter) for letter in scored["letters"]],
+                    "probabilities": [item["probabilities"].get(letter, 0.0) for letter in item["letters"]],
+                    "option_logits": [item["logprobs"].get(letter) for letter in item["letters"]],
                     "has_image": bool(image),
                     "image_tokens": 0,
-                    "input_tokens": scored["prompt_tokens"],
+                    "input_tokens": item["prompt_tokens"],
                     "prompt_version": "sglang-prefill-logp",
                     "probability_status": "conditional option score from SGLang top_logprobs",
                 }
             )
-            input_tokens += scored["prompt_tokens"]
-            if index == 0:
-                first_seconds = scored["seconds"]
-            else:
-                rest_seconds += scored["seconds"]
+            input_tokens += item["prompt_tokens"]
+            request_seconds.append(item["seconds"])
         timing = {
-            "total_seconds": time.perf_counter() - started,
-            "prefill_seconds": first_seconds,
-            "suffix_seconds": rest_seconds,
+            "total_seconds": total_seconds,
+            "prefill_seconds": total_seconds,
+            "suffix_seconds": 0.0,
             "encode_seconds": 0.0,
             "image_seconds": 0.0,
             "batch_size": len(results),
             "prefix_tokens": results[0]["input_tokens"] if results else 0,
             "true_suffix_tokens": 0,
             "prefill_passes": 1,
-            "suffix_passes": max(len(results) - 1, 0),
+            "suffix_passes": 0,
             "forward_passes": len(results),
-            "requests": self.requests,
+            "requests": len(results),
+            "concurrency": workers,
+            "sum_request_seconds": sum(request_seconds),
+            "max_request_seconds": max(request_seconds) if request_seconds else 0.0,
+            "batched": True,
             "image": bool(image),
             "backend": self.backend_name,
             "input_tokens": input_tokens,

@@ -83,12 +83,12 @@ vllm serve /path/to/model --port 30000 --enable-prefix-caching
 # 2) 用该后端提供 TeleJev 接口
 python serve.py --backend sglang \     # 或 --backend vllm
   --server-url http://127.0.0.1:30000 \
-  --served-model Qwen/Qwen3.5-4B
+  --served-model Qwen/Qwen3.5-4B --port 22001
 ```
 
 - **Jev 式读取**：`max_tokens=1` + `logprobs`，只对选项字母归一化（prefill-only，不生成）
 - **生成**：同一服务的普通 `max_tokens` 路径
-- **多判据**：逐条请求，靠服务端前缀缓存复用图像/state 共享前缀（SGLang Radix Cache 默认开；vLLM 需 `--enable-prefix-caching`）
+- **多判据**：并发发出各判据请求，由服务端**连续批处理**在同一 step 内完成，并用前缀缓存复用图像/state 共享前缀（SGLang Radix Cache 默认开；vLLM 需 `--enable-prefix-caching`）
 
 直接用 vLLM：`python serve.py --backend vllm --server-url http://127.0.0.1:30000 --served-model <model>`。
 
