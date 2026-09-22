@@ -103,7 +103,12 @@ def build_completion(model: str, output: dict, detail: dict) -> dict:
     """Wrap the assembled decision in an OpenAI chat.completion envelope."""
     content = json.dumps(output, ensure_ascii=False)
     prompt_tokens = int(detail.get("prompt_tokens", 0) or 0)
-    usage = {"prompt_tokens": prompt_tokens, "completion_tokens": 0, "total_tokens": prompt_tokens}
+    usage = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": 0,
+        "total_tokens": prompt_tokens,
+        "prompt_tokens_details": {"cached_tokens": int(detail.get("cached_tokens", 0) or 0)},
+    }
     return {
         "id": "chatcmpl-" + hashlib.sha256(content.encode()).hexdigest()[:24],
         "object": "chat.completion",

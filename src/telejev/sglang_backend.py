@@ -250,10 +250,12 @@ class SGLangBackend:
         total = sum(weights.values())
         probabilities = {label: weights[label] / total for label in labels if label in weights}
         usage = body.get("usage", {}) or {}
+        details = usage.get("prompt_tokens_details") or {}
         return {
             "probabilities": probabilities,
             "logprobs": mapped,
             "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+            "cached_tokens": int(details.get("cached_tokens", 0) or 0),
             "seconds": elapsed,
             "raw_token": content.get("token"),
         }

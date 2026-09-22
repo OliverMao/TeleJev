@@ -159,6 +159,7 @@ class DecisionService:
             "concurrency": workers,
             "prefix_warmup": True,
             "prompt_tokens": sum(int(result.get("prompt_tokens", 0) or 0) for result in outcomes),
+            "cached_tokens": sum(int(result.get("cached_tokens", 0) or 0) for result in outcomes),
             "total_seconds": total_seconds,
             "sum_request_seconds": sum(float(result.get("seconds", 0.0) or 0.0) for result in outcomes),
         }
@@ -322,6 +323,7 @@ def fake_score_labels():
             "probabilities": probabilities,
             "logprobs": {label: math.log(value) for label, value in probabilities.items()},
             "prompt_tokens": 42,
+            "cached_tokens": 32 if len(messages) > 1 else 0,
             "seconds": 0.002,
             "raw_token": labels[0],
         }
@@ -408,17 +410,18 @@ def help_document(model_name: str) -> dict:
             "response": {
                 "object": "chat.completion",
                 "choices": [{"message": {"role": "assistant", "content": "{\"has_person\": 1, \"violations\": [\"挥手\"]}"}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 300, "completion_tokens": 0, "total_tokens": 300},
+                "usage": {"prompt_tokens": 300, "completion_tokens": 0, "total_tokens": 300, "prompt_tokens_details": {"cached_tokens": 300}},
                 "telejev": {
                     "tasks": ["摔倒", "挥手"],
                     "has_person_probabilities": {"A": 0.9, "B": 0.1},
                     "violation_probabilities": {"摔倒": {"A": 0.2, "B": 0.8}, "挥手": {"A": 0.7, "B": 0.3}},
                     "requests": 3,
                     "concurrency": 3,
+                    "cached_tokens": 300,
                 },
             },
             "task_source": "任务名优先取顶层 tasks，其次从 messages 里的“任务名称：X”解析，都没有则用内置默认集合。",
-            "prefix_cache": "system + 图像 + 任务清单在前，逐任务指令拼在最后；服务端 APC/Radix Cache 只编码一次共享前缀。SGLang 默认开，vLLM 需 --enable-prefix-caching（多图还需 --limit-mm-per-prompt image=20）；内部先用“是否有人”预热后缀，再并发其余任务。",
+            "prefix_cache": "system + 图像 + 任务清单在前，逐任务指令拼在最后；服务端 APC/Radix Cache 只编码一次共享前缀。SGLang 默认开，vLLM 需 --enable-prefix-caching（多图还需 --limit-mm-per-prompt image=20）；内部先用“是否有人”预热后缀，再并发其余任务。追加式帧历史（旧帧不变、新帧后）前缀稳定，命中最佳。响应 usage.prompt_tokens_details.cached_tokens / telejev.cached_tokens 可用于验证是否命中。",
         },
         "notes": [
             "除 /v1/chat/completions 外，其余 POST 端点需要 body 中包含 state 与 criteria（或单条决策行）。",
