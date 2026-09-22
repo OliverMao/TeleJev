@@ -160,6 +160,14 @@ class DecisionService:
             "prefix_warmup": True,
             "prompt_tokens": sum(int(result.get("prompt_tokens", 0) or 0) for result in outcomes),
             "cached_tokens": sum(int(result.get("cached_tokens", 0) or 0) for result in outcomes),
+            "requests_detail": [
+                {
+                    "prompt_tokens": int(result.get("prompt_tokens", 0) or 0),
+                    "cached_tokens": int(result.get("cached_tokens", 0) or 0),
+                    "seconds": float(result.get("seconds", 0.0) or 0.0),
+                }
+                for result in outcomes
+            ],
             "total_seconds": total_seconds,
             "sum_request_seconds": sum(float(result.get("seconds", 0.0) or 0.0) for result in outcomes),
         }
