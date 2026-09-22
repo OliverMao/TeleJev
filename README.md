@@ -105,6 +105,8 @@ python examples/sglang_compare.py \
 | `POST` | `/decide` | 请求体就是一条决策行（可含可选 `image`），返回固定决策对象。 |
 | `POST` | `/decide-batch` | 一份 state/image + 多个 criteria，共享一次图像 prefill；返回每个任务结果与耗时。 |
 | `POST` | `/generate` | 同一组 criteria 走完整自回归生成（`model.generate`），返回文本、解析结果与耗时。 |
+| `POST` | `/v1/chat/completions` | OpenAI 兼容的 Jev 读取：客户端发 messages（可含图像）+ 允许答案，返回结构化 `chat.completion`。 |
+| `GET` | `/v1/models` | OpenAI 兼容的模型列表。 |
 | `GET` | `/health` | 存活探针，返回服务与模型名。 |
 
 调用原生接口：
@@ -164,6 +166,42 @@ curl -X POST http://127.0.0.1:8000/decide \
 ```
 
 图像只有在 `--model` 暴露多模态 processor 时才会真正送入模型（启动时会打印 `multimodal=True/False`）；纯文本模型会直接报错。`--mode direct` 支持图像，`shared` 不支持。返回的 `has_image` 标明本次是否使用了图像，`image_tokens` 是实际喂给视觉塔的图像 token 数（为 0 说明视觉没有生效）。
+
+### OpenAI 兼容的 Jev 接口
+
+把 Jev 式读 logits 包成一个标准 OpenAI 接口：客户端像平时一样发 `messages`（可含图像）和自定义提示词，再通过 `response_format` 的 `json_schema` enum（或顶层 `options`）告诉我们要读取哪些答案；服务端只做一次 prefill-only logprob 读取，返回结构化的 `chat.completion`，对客户端无感。
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "telejev",
+    "messages": [
+      {"role": "system", "content": "你是调度助手，只能从 港口/账单 里选一个标签。"},
+      {"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+        {"type": "text", "text": "这个请求该给哪个部门？只回答标签。"}
+      ]}
+    ],
+    "response_format": {"type": "json_schema", "json_schema": {"name": "route", "strict": true,
+      "schema": {"type": "object", "properties": {"department": {"type": "string", "enum": ["港口", "账单"]}}, "required": ["department"]}}}
+  }'
+```
+
+返回（content 就是按 schema 形状组装的结构化结果）：
+
+```json
+{
+  "object": "chat.completion",
+  "choices": [{"message": {"role": "assistant", "content": "{\"department\": \"账单\"}"}, "finish_reason": "stop"}],
+  "usage": {"prompt_tokens": 42, "completion_tokens": 0, "total_tokens": 42},
+  "telejev": {"probabilities": {"港口": 0.45, "账单": 0.55}, "chosen": "账单", "key": "department"}
+}
+```
+
+- 也支持顶层 `options`：`{"messages": [...], "options": ["yes", "no"]}` → 返回 `{"choice": "..."}`。
+- 读取的是选项的**首个 token** logprob（`max_tokens=1` + `logprobs`），因此标签需是单 token。
+- 该端点需 `--backend sglang|vllm`（复用服务端 tokenizer / 前缀缓存；本地进程内后端暂不支持）。
 
 ### 批量判定（多任务）
 

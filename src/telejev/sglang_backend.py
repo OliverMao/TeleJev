@@ -216,6 +216,48 @@ class SGLangBackend:
         }
         return results, timing
 
+    # ---- arbitrary messages + label readout (OpenAI-compatible Jev) ----------
+    def score_labels(self, messages: list[dict], labels: list[str], top_logprobs: int = 20):
+        """Prefill-only logprob readout over caller-supplied labels for raw messages."""
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("messages must be a nonempty list")
+        if not isinstance(labels, list) or not labels:
+            raise ValueError("labels must be a nonempty list")
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": 1,
+            "temperature": 0.0,
+            "logprobs": True,
+            "top_logprobs": min(max(top_logprobs, len(labels) + 2), 20),
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        body, elapsed = self._post("/v1/chat/completions", payload)
+        try:
+            content = body["choices"][0]["logprobs"]["content"][0]
+        except (KeyError, IndexError, TypeError) as error:
+            raise SGLangError("SGLang response did not include first-token logprobs") from error
+        mapped = _map_label_logprobs(content.get("top_logprobs", []), labels)
+        chosen = str(content.get("token", "")).strip().upper()
+        for label in labels:
+            if label.strip().upper() == chosen and mapped.get(label) is None:
+                mapped[label] = float(content.get("logprob", float("-inf")))
+        available = {label: value for label, value in mapped.items() if value is not None}
+        if not available:
+            raise SGLangError("None of the labels appeared in SGLang top_logprobs")
+        maximum = max(available.values())
+        weights = {label: pow(2.718281828459045, value - maximum) for label, value in available.items()}
+        total = sum(weights.values())
+        probabilities = {label: weights[label] / total for label in labels if label in weights}
+        usage = body.get("usage", {}) or {}
+        return {
+            "probabilities": probabilities,
+            "logprobs": mapped,
+            "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+            "seconds": elapsed,
+            "raw_token": content.get("token"),
+        }
+
     # ---- generation --------------------------------------------------------
     def generate(self, state, image, criteria, max_new_tokens=None):
         if not isinstance(criteria, list) or not criteria:

@@ -14,9 +14,11 @@ Run the interface without a GPU (deterministic stub scorer)::
 Endpoints
 ---------
 GET  /health        liveness probe
+GET  /v1/models     OpenAI-compatible model list
 POST /decide        one decision row -> fixed decision object
 POST /decide-batch  one state/image + many criteria, sharing one image prefill
 POST /generate      same criteria via full greedy autoregressive generation
+POST /v1/chat/completions  OpenAI-compatible Jev readout over client labels
 
 ``image`` is optional and may be a base64 ``data:`` URI, an ``http(s)`` URL, or a
 local file path. It is only used when the loaded model exposes a multimodal
@@ -66,10 +68,11 @@ def canonical_decision(raw: dict) -> dict:
 class DecisionService:
     """Thread-safe wrapper around single-row and batch scorers."""
 
-    def __init__(self, score_fn, model_name: str, batch_fn=None, generate_fn=None):
+    def __init__(self, score_fn, model_name: str, batch_fn=None, generate_fn=None, score_labels_fn=None):
         self._score = score_fn
         self._batch = batch_fn
         self._generate = generate_fn
+        self._score_labels = score_labels_fn
         self.model_name = model_name
         self._lock = threading.Lock()
 
@@ -107,6 +110,20 @@ class DecisionService:
             result = self._generate(state, image, criteria, max_new_tokens)
         result["request_seconds"] = time.perf_counter() - started
         return result
+
+    def openai_chat(self, body: dict) -> dict:
+        """OpenAI-compatible Jev readout: caller messages + allowed labels -> decision."""
+        if self._score_labels is None:
+            raise ValueError("The OpenAI-compatible Jev endpoint requires --backend sglang or vllm")
+        from .openai_compat import build_completion, extract_labels
+
+        labels, key = extract_labels(body)
+        messages = body.get("messages")
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("messages must be a nonempty list")
+        with self._lock:
+            result = self._score_labels(messages, labels)
+        return build_completion(self.model_name, result, key, labels)
 
 
 def load_model_scorers(model: str, max_tokens: int = 4096):
@@ -247,6 +264,32 @@ def fake_generate():
     return generate_fn
 
 
+def fake_score_labels():
+    """Deterministic label readout stub for interface tests."""
+
+    def score_labels_fn(messages: list, labels: list) -> dict:
+        import hashlib
+        import math
+
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("messages must be a nonempty list")
+        if not isinstance(labels, list) or not labels:
+            raise ValueError("labels must be a nonempty list")
+        seed = int(hashlib.sha256(json.dumps(messages, ensure_ascii=False).encode()).hexdigest(), 16)
+        weights = {label: math.exp(((seed + index) % 7) / 5.0) for index, label in enumerate(labels)}
+        total = sum(weights.values())
+        probabilities = {label: weight / total for label, weight in weights.items()}
+        return {
+            "probabilities": probabilities,
+            "logprobs": {label: math.log(value) for label, value in probabilities.items()},
+            "prompt_tokens": 42,
+            "seconds": 0.002,
+            "raw_token": labels[0],
+        }
+
+    return score_labels_fn
+
+
 class _Handler(BaseHTTPRequestHandler):
     service: DecisionService = None  # type: ignore[assignment]
 
@@ -272,11 +315,16 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/health":
             self._send(200, {"status": "ok", "model": self.service.model_name})
+        elif self.path == "/v1/models":
+            self._send(200, {
+                "object": "list",
+                "data": [{"id": self.service.model_name, "object": "model", "owned_by": "telejev"}],
+            })
         else:
             self._send(404, {"error": {"message": f"unknown path {self.path}", "type": "invalid_request_error"}})
 
     def do_POST(self) -> None:
-        if self.path not in {"/decide", "/decide-batch", "/generate"}:
+        if self.path not in {"/decide", "/decide-batch", "/generate", "/v1/chat/completions"}:
             self._send(404, {"error": {"message": f"unknown path {self.path}", "type": "invalid_request_error"}})
             return
         try:
@@ -286,8 +334,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(200, self.service.decide(body))
             elif self.path == "/decide-batch":
                 self._send(200, self.service.decide_batch(body))
-            else:
+            elif self.path == "/generate":
                 self._send(200, self.service.generate(body))
+            else:
+                self._send(200, self.service.openai_chat(body))
         except Exception as error:  # surface a stable error envelope
             self._send(400, {"error": {"message": str(error), "type": "invalid_request_error"}})
 
@@ -318,14 +368,18 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.fake:
-        service = DecisionService(fake_scorer(), "telejev-fake", fake_batch_scorer(), fake_generate())
+        service = DecisionService(
+            fake_scorer(), "telejev-fake", fake_batch_scorer(), fake_generate(), fake_score_labels()
+        )
     elif args.backend in ("sglang", "vllm"):
         from .sglang_backend import SGLangBackend
 
         url = args.server_url or "http://127.0.0.1:30000"
         backend = SGLangBackend(url, args.served_model or args.model, backend_name=args.backend)
         print(f"{args.backend} backend: {url} model={backend.model}", flush=True)
-        service = DecisionService(backend.score_row, backend.model, backend.score_batch, backend.generate)
+        service = DecisionService(
+            backend.score_row, backend.model, backend.score_batch, backend.generate, backend.score_labels
+        )
     else:
         score_fn, batch_fn, generate_fn, metadata = load_model_scorers(args.model, args.max_tokens)
         print(f"Loaded model: multimodal={metadata['multimodal']}", flush=True)
