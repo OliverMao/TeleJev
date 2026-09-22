@@ -37,10 +37,12 @@ def parse_output(text: str, criteria: list[dict]) -> tuple[dict, list[str]]:
         except json.JSONDecodeError:
             data = None
         if isinstance(data, dict):
+            raw_person = data.get("has_person", 0)
             try:
-                has_person = 1 if int(data.get("has_person", 0)) else 0
+                raw_person = int(raw_person)
             except (TypeError, ValueError):
-                has_person = 0
+                raw_person = 0
+            has_person = raw_person if raw_person in (-1, 0, 1) else (1 if raw_person else 0)
             allowed = behavior_labels(criteria)
             raw = data.get("violations", [])
             if isinstance(raw, list):
@@ -49,7 +51,7 @@ def parse_output(text: str, criteria: list[dict]) -> tuple[dict, list[str]]:
     answers = []
     for criterion in criteria:
         if criterion.get("id") == "person":
-            answers.append("yes" if has_person else "no")
+            answers.append("yes" if has_person == 1 else "no")
         else:
             answers.append("yes" if (criterion.get("label") or criterion.get("id")) in violations else "no")
     return output, answers
