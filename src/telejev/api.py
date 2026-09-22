@@ -290,6 +290,110 @@ def fake_score_labels():
     return score_labels_fn
 
 
+def help_document(model_name: str) -> dict:
+    """Machine-readable usage guide served by GET /help."""
+    return {
+        "service": "telejev",
+        "model": model_name,
+        "summary": "Runtime-defined semantic decisions: Jev-style direct logit readout and full autoregressive generation.",
+        "endpoints": [
+            {"method": "GET", "path": "/help", "description": "本说明。"},
+            {"method": "GET", "path": "/health", "description": "存活探针，返回服务与模型名。"},
+            {"method": "GET", "path": "/v1/models", "description": "OpenAI 兼容的模型列表。"},
+            {"method": "POST", "path": "/decide", "description": "单条决策行 -> 固定决策对象。"},
+            {"method": "POST", "path": "/decide-batch", "description": "一份 state/image + 多个 criteria，图像只 prefill 一次。"},
+            {"method": "POST", "path": "/generate", "description": "同一组 criteria 走完整自回归，直接生成 {has_person, violations}。"},
+            {"method": "POST", "path": "/v1/chat/completions", "description": "OpenAI 兼容的 Jev 读取：messages + 允许答案 -> 结构化结果。"},
+        ],
+        "decide_batch": {
+            "request": {
+                "state": "监控画面截图。",
+                "image": "https://ossv2.yoobit.cn/nife/fall.png 或 data:image/...;base64,... 或本地路径",
+                "criteria": [
+                    {
+                        "id": "fall",
+                        "label": "摔倒",
+                        "question": "画面中是否有人正在摔倒？",
+                        "options": [
+                            {"id": "yes", "description": "画面中有人正在摔倒。"},
+                            {"id": "no", "description": "画面中没有人正在摔倒。"},
+                        ],
+                    }
+                ],
+            },
+            "response": {
+                "results": [
+                    {
+                        "option_id": "no",
+                        "letter": "B",
+                        "probabilities": {"yes": 0.12, "no": 0.88},
+                        "option_logits": {"yes": 3.1, "no": 5.0},
+                        "has_image": True,
+                        "image_tokens": 1024,
+                        "input_tokens": 312,
+                    }
+                ],
+                "timing": {
+                    "total_seconds": 0.09,
+                    "requests": 1,
+                    "concurrency": 1,
+                    "forward_passes": 1,
+                },
+            },
+            "curl": "curl -X POST $BASE/decide-batch -H 'Content-Type: application/json' -d @batch.json",
+        },
+        "generate": {
+            "request": {"state": "监控画面截图。", "image": "data:image/...;base64,...", "criteria": "同 /decide-batch"},
+            "response": {
+                "text": "{\"has_person\": 0, \"violations\": [\"摔倒\"]}",
+                "output": {"has_person": 0, "violations": ["摔倒"]},
+                "new_tokens": 12,
+                "generate_seconds": 1.23,
+                "total_seconds": 1.24,
+            },
+            "curl": "curl -X POST $BASE/generate -H 'Content-Type: application/json' -d '{...}'  # 与 /decide-batch 同体，无 options 也可",
+        },
+        "openai_chat": {
+            "request": {
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": "你是调度助手，只能从 港口/账单 里选一个标签。"},
+                    {"role": "user", "content": [
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+                        {"type": "text", "text": "这个请求该给哪个部门？只回答标签。"},
+                    ]},
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "route",
+                        "strict": True,
+                        "schema": {
+                            "type": "object",
+                            "properties": {"department": {"type": "string", "enum": ["港口", "账单"]}},
+                            "required": ["department"],
+                        },
+                    },
+                },
+            },
+            "response": {
+                "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "{\"department\": \"账单\"}"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 42, "completion_tokens": 0, "total_tokens": 42},
+                "telejev": {"probabilities": {"港口": 0.45, "账单": 0.55}, "chosen": "账单", "key": "department"},
+            },
+            "alternative": "也可用顶层 options 代替 response_format：{\"messages\": [...], \"options\": [\"yes\", \"no\"]} -> content 为 {\"choice\": \"...\"}。",
+        },
+        "notes": [
+            "除 /v1/chat/completions 外，其余 POST 端点需要 body 中包含 state 与 criteria（或单条决策行）。",
+            "image 支持 data URI、http(s) URL、本地路径；仅当模型暴露多模态 processor 时会真正送入。",
+            "Jev 式（/decide, /decide-batch, /v1/chat/completions）不生成 token；/generate 为完整自回归基线。",
+            "所有响应为 UTF-8 JSON；输出格式固定，无需 JSON 修复。",
+            "当前后端：" + model_name,
+        ],
+    }
+
+
 class _Handler(BaseHTTPRequestHandler):
     service: DecisionService = None  # type: ignore[assignment]
 
@@ -315,6 +419,8 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/health":
             self._send(200, {"status": "ok", "model": self.service.model_name})
+        elif self.path == "/help":
+            self._send(200, help_document(self.service.model_name))
         elif self.path == "/v1/models":
             self._send(200, {
                 "object": "list",

@@ -102,6 +102,7 @@ python examples/sglang_compare.py \
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| `GET` | `/help` | 调用说明：端点列表、请求/响应示例。 |
 | `POST` | `/decide` | 请求体就是一条决策行（可含可选 `image`），返回固定决策对象。 |
 | `POST` | `/decide-batch` | 一份 state/image + 多个 criteria，共享一次图像 prefill；返回每个任务结果与耗时。 |
 | `POST` | `/generate` | 同一组 criteria 走完整自回归生成（`model.generate`），返回文本、解析结果与耗时。 |

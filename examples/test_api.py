@@ -148,6 +148,13 @@ def main() -> None:
             models = json.loads(response.read())
         assert models["data"][0]["id"] == "telejev-fake"
 
+        # 5c. /help documents every endpoint.
+        with urllib.request.urlopen(base + "/help") as response:
+            help_doc = json.loads(response.read())
+        paths = {item["path"] for item in help_doc["endpoints"]}
+        assert {"/decide", "/decide-batch", "/generate", "/v1/chat/completions", "/help"} <= paths
+        assert "response" in help_doc["decide_batch"] and "output" in help_doc["generate"]["response"]
+
         # 6. Health probe reports the model name.
         with urllib.request.urlopen(base + "/health") as response:
             health = json.loads(response.read())
