@@ -35,7 +35,6 @@ Each result contains typed option scores, timing, and a prompt hash.
 Modes:
 
 - `--mode direct` — one forward pass per row, reading declared option logits. Supports optional image input.
-- `--mode serial` — reuse a shared prefix across rows.
 - `--mode shared` — prefill an identical state once, then branch across criteria in parallel.
 
 Only one CUDA GPU may be visible to the process; use `CUDA_VISIBLE_DEVICES` to select it.
@@ -164,7 +163,7 @@ curl -X POST http://127.0.0.1:8000/decide \
   }'
 ```
 
-图像只有在 `--model` 暴露多模态 processor 时才会真正送入模型（启动时会打印 `multimodal=True/False`）；纯文本模型会直接报错。`--mode direct` 支持图像，`serial` / `shared` 不支持。返回的 `has_image` 标明本次是否使用了图像，`image_tokens` 是实际喂给视觉塔的图像 token 数（为 0 说明视觉没有生效）。
+图像只有在 `--model` 暴露多模态 processor 时才会真正送入模型（启动时会打印 `multimodal=True/False`）；纯文本模型会直接报错。`--mode direct` 支持图像，`shared` 不支持。返回的 `has_image` 标明本次是否使用了图像，`image_tokens` 是实际喂给视觉塔的图像 token 数（为 0 说明视觉没有生效）。
 
 ### 批量判定（多任务）
 

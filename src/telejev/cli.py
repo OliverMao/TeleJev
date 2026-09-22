@@ -8,13 +8,12 @@ from pathlib import Path
 
 from .core import load_causal_model, validate_row
 from .direct import score as direct_score
-from .serial import SerialPrefixScorer
 from .shared import score_shared
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("direct", "serial", "shared"), required=True)
+    parser.add_argument("--mode", choices=("direct", "shared"), required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -34,11 +33,6 @@ def main() -> None:
             results, timing = score_shared(model, tokenizer, rows, metadata, args.max_tokens)
             for result in results:
                 destination.write(json.dumps({**result, "shared_timing": timing}, allow_nan=False) + "\n")
-        elif args.mode == "serial":
-            scorer = SerialPrefixScorer(model, tokenizer, metadata, args.max_tokens)
-            for row in rows:
-                destination.write(json.dumps(scorer.score(row), allow_nan=False) + "\n")
-                destination.flush()
         else:
             for row in rows:
                 destination.write(json.dumps(direct_score(model, tokenizer, row, metadata, args.max_tokens, processor), allow_nan=False) + "\n")
