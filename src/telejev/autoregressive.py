@@ -13,40 +13,15 @@ import time
 
 from .core import load_image
 from .direct import _apply_chat_template
-
-SYSTEM_PROMPT = (
-    "You are a surveillance analyst. Decide from the attached image whether any "
-    "person is present and which of the listed behaviours are present. Answer "
-    "with only a JSON object, no explanation, no markdown."
-)
-
-
-def _behavior_labels(criteria: list[dict]) -> list[str]:
-    return [criterion.get("label") or criterion.get("id") for criterion in criteria if criterion.get("id") != "person"]
-
-
-def build_prompt_text(state, criteria) -> str:
-    """Prompt text asking for the final {has_person, violations} object."""
-    lines = ["Evidence: " + json.dumps(state, ensure_ascii=False), "Decide from the image:"]
-    for criterion in criteria:
-        label = criterion.get("label") or criterion.get("id")
-        field = "has_person (0 or 1)" if criterion.get("id") == "person" else f'violation "{label}"'
-        lines.append(f"- {field}: {criterion['question']}")
-    allowed = ", ".join(json.dumps(label, ensure_ascii=False) for label in _behavior_labels(criteria))
-    lines.append(f"Allowed violations: [{allowed}]")
-    lines.append(
-        'Respond with ONLY a JSON object exactly like {"has_person": 0, "violations": ["..."]}. '
-        "has_person=1 if any person is present; list only the violation names that are present."
-    )
-    return "\n".join(lines)
+from .prompt import GENERATION_SYSTEM, behavior_labels, build_generation_text
 
 
 def build_messages(state, criteria, has_image: bool) -> list[dict]:
     """One prompt that asks for the final {has_person, violations} object."""
-    text = build_prompt_text(state, criteria)
+    text = build_generation_text(state, criteria)
     content = [{"type": "image"}, {"type": "text", "text": text}] if has_image else text
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": GENERATION_SYSTEM},
         {"role": "user", "content": content},
     ]
 
@@ -66,7 +41,7 @@ def parse_output(text: str, criteria: list[dict]) -> tuple[dict, list[str]]:
                 has_person = 1 if int(data.get("has_person", 0)) else 0
             except (TypeError, ValueError):
                 has_person = 0
-            allowed = _behavior_labels(criteria)
+            allowed = behavior_labels(criteria)
             raw = data.get("violations", [])
             if isinstance(raw, list):
                 violations = [item for item in raw if item in allowed]

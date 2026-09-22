@@ -10,11 +10,9 @@ import math
 import urllib.request
 from pathlib import Path
 
+from .prompt import DIRECT_SYSTEM, build_decision_payload
+
 LETTERS = "ABCDEFGHIJKLMNOP"
-DIRECT_SYSTEM = (
-    "Apply the supplied criterion to the supplied evidence. Choose exactly one listed option. "
-    "Respond with only its uppercase letter, with no explanation or reasoning."
-)
 
 
 def validate_row(row: dict) -> None:
@@ -47,17 +45,10 @@ def validate_row(row: dict) -> None:
 
 def direct_messages(row: dict) -> list[dict]:
     validate_row(row)
-    payload = {
-        "evidence": row["state"],
-        "criterion": row["question"],
-        "options": [
-            {"letter": LETTERS[index], "description": option["description"]}
-            for index, option in enumerate(row["options"])
-        ],
-    }
+    payload = build_decision_payload(row["state"], row["question"], row["options"], LETTERS)
     return [
         {"role": "system", "content": DIRECT_SYSTEM},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        {"role": "user", "content": payload},
     ]
 
 

@@ -23,13 +23,9 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .autoregressive import SYSTEM_PROMPT, build_prompt_text, parse_output
+from .autoregressive import parse_output
 from .core import LETTERS, direct_messages
-
-DEFAULT_SYSTEM = (
-    "Apply the supplied criterion to the supplied evidence. Choose exactly one listed option. "
-    "Respond with only its uppercase letter, with no explanation or reasoning."
-)
+from .prompt import DIRECT_SYSTEM, GENERATION_SYSTEM, build_generation_text
 
 
 class SGLangError(RuntimeError):
@@ -105,7 +101,7 @@ class SGLangBackend:
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": DEFAULT_SYSTEM},
+                {"role": "system", "content": DIRECT_SYSTEM},
                 {"role": "user", "content": self._content(messages[-1]["content"], image)},
             ],
             "max_tokens": 1,
@@ -220,11 +216,11 @@ class SGLangBackend:
     def generate(self, state, image, criteria, max_new_tokens=None):
         if not isinstance(criteria, list) or not criteria:
             raise ValueError("criteria must be a nonempty list")
-        text = build_prompt_text(state, criteria)
+        text = build_generation_text(state, criteria)
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": GENERATION_SYSTEM},
                 {"role": "user", "content": self._content(text, image)},
             ],
             "max_tokens": max_new_tokens or (16 * len(criteria) + 32),
