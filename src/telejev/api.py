@@ -293,10 +293,14 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", default="Qwen/Qwen3.5-4B", help="Model source or local path")
-    parser.add_argument("--backend", choices=("local", "sglang"), default="local",
-                        help="local = load the model in-process; sglang = use a running SGLang server")
-    parser.add_argument("--sglang-url", default="http://127.0.0.1:30000", help="SGLang server base URL")
-    parser.add_argument("--sglang-model", default=None, help="Model name served by SGLang (default: --model)")
+    parser.add_argument("--backend", choices=("local", "sglang", "vllm"), default="local",
+                        help="local = load the model in-process; sglang/vllm = use a running OpenAI-compatible server")
+    parser.add_argument("--server-url", dest="server_url", default=None,
+                        help="OpenAI-compatible server base URL (default: http://127.0.0.1:30000)")
+    parser.add_argument("--sglang-url", dest="server_url", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--served-model", dest="served_model", default=None,
+                        help="Model name served by the server (default: --model)")
+    parser.add_argument("--sglang-model", dest="served_model", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--max-tokens", type=int, default=4096)
@@ -305,11 +309,12 @@ def main() -> None:
 
     if args.fake:
         service = DecisionService(fake_scorer(), "telejev-fake", fake_batch_scorer(), fake_generate())
-    elif args.backend == "sglang":
+    elif args.backend in ("sglang", "vllm"):
         from .sglang_backend import SGLangBackend
 
-        backend = SGLangBackend(args.sglang_url, args.sglang_model or args.model)
-        print(f"SGLang backend: {args.sglang_url} model={backend.model}", flush=True)
+        url = args.server_url or "http://127.0.0.1:30000"
+        backend = SGLangBackend(url, args.served_model or args.model, backend_name=args.backend)
+        print(f"{args.backend} backend: {url} model={backend.model}", flush=True)
         service = DecisionService(backend.score_row, backend.model, backend.score_batch, backend.generate)
     else:
         score_fn, batch_fn, generate_fn, metadata = load_model_scorers(args.model, args.max_tokens)

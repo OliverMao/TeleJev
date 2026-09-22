@@ -70,25 +70,29 @@ CUDA_VISIBLE_DEVICES=0 python serve.py --model Qwen/Qwen3.5-4B
 python serve.py --fake
 ```
 
-### SGLang 后端
+### SGLang / vLLM 后端
 
-把推理放到运行中的 SGLang 服务上，Jev 式读 logits 与生成都走 SGLang，享受融合 kernel / CUDA Graph / Radix Cache：
+把推理放到运行中的 OpenAI 兼容服务上（SGLang 或 vLLM），Jev 式读 logits 与生成都走该服务，享受融合 kernel / CUDA Graph / 前缀缓存：
 
 ```bash
-# 1) 先起 SGLang（示例）
+# 1) 起服务（二选一）
 python -m sglang.launch_server --model-path /path/to/model --port 30000
+# 或
+vllm serve /path/to/model --port 30000 --enable-prefix-caching
 
-# 2) 用 SGLang 后端提供 TeleJev 接口
-python serve.py --backend sglang \
-  --sglang-url http://127.0.0.1:30000 \
-  --sglang-model Qwen/Qwen3.5-4B
+# 2) 用该后端提供 TeleJev 接口
+python serve.py --backend sglang \     # 或 --backend vllm
+  --server-url http://127.0.0.1:30000 \
+  --served-model Qwen/Qwen3.5-4B
 ```
 
 - **Jev 式读取**：`max_tokens=1` + `logprobs`，只对选项字母归一化（prefill-only，不生成）
-- **生成**：同一 SGLang 服务的普通 `max_tokens` 路径
-- **多判据**：逐条请求，靠 SGLang 的 Radix Cache 复用图像/state 共享前缀
+- **生成**：同一服务的普通 `max_tokens` 路径
+- **多判据**：逐条请求，靠服务端前缀缓存复用图像/state 共享前缀（SGLang Radix Cache 默认开；vLLM 需 `--enable-prefix-caching`）
 
-直接对比两者：
+直接用 vLLM：`python serve.py --backend vllm --server-url http://127.0.0.1:30000 --served-model <model>`。
+
+直接对比两者（对 SGLang / vLLM 都适用）：
 
 ```bash
 python examples/sglang_compare.py \

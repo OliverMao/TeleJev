@@ -61,9 +61,10 @@ def main() -> None:
     parser.add_argument("--image", default="examples/fall.png")
     parser.add_argument("--state", default="监控画面截图。")
     parser.add_argument("--max-new-tokens", type=int, default=None)
+    parser.add_argument("--backend-name", default="sglang", help="label only: sglang or vllm")
     args = parser.parse_args()
 
-    backend = SGLangBackend(args.base_url, args.model)
+    backend = SGLangBackend(args.base_url, args.model, backend_name=args.backend_name)
     criteria = build_criteria()
 
     results, direct_timing = backend.score_batch(args.state, args.image or None, criteria)

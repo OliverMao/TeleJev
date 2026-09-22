@@ -1,10 +1,11 @@
-"""SGLang HTTP backend: Jev-style logit readout and generation on SGLang.
+"""OpenAI-compatible backend (SGLang / vLLM): Jev-style readout and generation.
 
-Talks to a running SGLang server (OpenAI-compatible ``/v1/chat/completions``) so
-that both the direct option readout and the autoregressive path use the same
-optimized runtime (fused kernels, CUDA graphs, Radix Cache). Jev-style readout is
+Talks to a running OpenAI-compatible server (``/v1/chat/completions``) so that both
+the direct option readout and the autoregressive path use the same optimized
+runtime (fused kernels, CUDA graphs, prefix cache). Jev-style readout is
 prefill-only: ``max_tokens=1`` plus ``logprobs`` over the option labels. Repeated
-image/state prefixes are reused by SGLang's Radix Cache.
+image/state prefixes are reused by the server's prefix cache (SGLang Radix Cache
+or vLLM automatic prefix caching).
 
 Based on the approach used by https://github.com/Yinsongxu/LLM2Jev
 (SGLang ``score`` with ``label_token_ids`` + shared-prefix staging).
@@ -59,11 +60,13 @@ def _map_label_logprobs(top_logprobs: list[dict], labels: list[str]) -> dict[str
 class SGLangBackend:
     """Direct option readout and generation against one SGLang server."""
 
-    def __init__(self, base_url: str, model: str, api_key: str | None = None, timeout: float = 300.0):
+    def __init__(self, base_url: str, model: str, api_key: str | None = None, timeout: float = 300.0,
+                 backend_name: str = "sglang"):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
+        self.backend_name = backend_name
         self.requests = 0
 
     def _post(self, path: str, payload: dict) -> tuple[dict, float]:
@@ -105,6 +108,7 @@ class SGLangBackend:
             "temperature": 0.0,
             "logprobs": True,
             "top_logprobs": 20,
+            "chat_template_kwargs": {"enable_thinking": False},
         }
         body, elapsed = self._post("/v1/chat/completions", payload)
         try:
@@ -192,7 +196,7 @@ class SGLangBackend:
             "forward_passes": len(results),
             "requests": self.requests,
             "image": bool(image),
-            "backend": "sglang",
+            "backend": self.backend_name,
             "input_tokens": input_tokens,
         }
         return results, timing
@@ -219,6 +223,7 @@ class SGLangBackend:
             ],
             "max_tokens": max_new_tokens or (8 * len(criteria) + 16),
             "temperature": 0.0,
+            "chat_template_kwargs": {"enable_thinking": False},
         }
         body, elapsed = self._post("/v1/chat/completions", payload)
         choice = body["choices"][0]
@@ -239,5 +244,5 @@ class SGLangBackend:
             "decode_passes": new_tokens,
             "forward_passes": 1 + new_tokens,
             "has_image": bool(image),
-            "backend": "sglang",
+            "backend": self.backend_name,
         }
