@@ -275,6 +275,26 @@ def main() -> None:
         assert fallback_direct["telejev"]["http_requests"] == 2
         assert failing_service._score_labels_batch is None
 
+        # 5g. When vLLM cannot fetch a spilled frame URL, retry once inline.
+        def frame_sensitive_batch(conversations, labels):
+            if "/frames/" in json.dumps(conversations, ensure_ascii=False):
+                raise RuntimeError("upstream 503 while fetching a /frames/ image")
+            return fake_score_labels_batch()(conversations, labels)
+
+        retry_service = DecisionService(
+            fake_scorer(), "telejev-fake", fake_batch_scorer(), fake_generate(), fake_score_labels(),
+            frame_sensitive_batch, FrameStore(), frame_base=base,
+        )
+        retried = retry_service.openai_chat({
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": TINY_PNG}},
+                {"type": "text", "text": "任务名称：摔倒"},
+            ]}],
+        })
+        assert retried["telejev"]["mode"] == "batch"
+        assert retried["telejev"]["http_requests"] == 2  # failed frame-URL try + inline retry
+        assert retry_service._frame_base is None
+
         # 5b. OpenAI-compatible model list.
         with urllib.request.urlopen(base + "/v1/models") as response:
             models = json.loads(response.read())

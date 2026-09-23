@@ -23,9 +23,9 @@ GET  /frames/<id>   images spilled from data URIs / paths for one-shot upstream 
 
 ``image`` is optional and may be a base64 ``data:`` URI, an ``http(s)`` URL, or a
 local file path. It is only used when the loaded model exposes a multimodal
-processor. With the vLLM backend, data-URI/local images are stored under
-``/frames/<id>`` (see ``--public-url``) so the upstream server fetches each frame
-once instead of receiving it in every per-task request.
+processor. With the vLLM backend, pass ``--public-url`` to store data-URI/local
+images under ``/frames/<id>`` so the upstream server fetches each frame once
+instead of receiving it in every per-task request.
 """
 
 from __future__ import annotations
@@ -103,15 +103,7 @@ def image_bytes(reference) -> tuple[str, bytes] | None:
     return None
 
 
-def _server_is_local(url: str) -> bool:
-    """True when the vLLM server runs on this host and can fetch our frame URLs."""
-    from urllib.parse import urlparse
-
-    host = (urlparse(url).hostname or "").lower()
-    return host in ("127.0.0.1", "localhost", "::1", "0.0.0.0")
-
-
-def spill_message_images(messages: list, store: FrameStore, base: str) -> list:
+def spill_message_images(messages: list, store: FrameStore, base: str) -> tuple[list, int]:
     """Copy messages, replacing data-URI/local image parts with stored frame URLs."""
     out = []
     spilled = 0
@@ -136,7 +128,7 @@ def spill_message_images(messages: list, store: FrameStore, base: str) -> list:
         out.append({**message, "content": parts} if changed else message)
     if spilled:
         logger.debug("spilled %d image(s) to %s/frames", spilled, base)
-    return out
+    return out, spilled
 
 
 def spill_image(image, store: FrameStore, base: str):
@@ -205,12 +197,26 @@ class DecisionService:
             raise ValueError("Batch scoring is not available on this server")
         started = time.perf_counter()
         state = body.get("state")
-        image = body.get("image")
+        original_image = body.get("image")
+        image = original_image
+        spilled = False
         if self.frame_store is not None and self._frame_base and image:
             image = spill_image(image, self.frame_store, self._frame_base)
+            spilled = image != original_image
         criteria = body.get("criteria")
-        with self._lock:
-            results, timing = self._batch(state, image, criteria)
+        try:
+            with self._lock:
+                results, timing = self._batch(state, image, criteria)
+        except Exception as error:
+            if not (spilled and "/frames/" in str(error)):
+                raise
+            logger.warning(
+                "vLLM could not fetch frames from %s (%s); retrying with the inline image",
+                self._frame_base, error,
+            )
+            self._frame_base = None  # this address is not reachable from the vLLM server
+            with self._lock:
+                results, timing = self._batch(state, original_image, criteria)
         timing["total_seconds"] = time.perf_counter() - started
         logger.info(
             "decide-batch criteria=%d mode=%s total=%.4fs",
@@ -241,11 +247,13 @@ class DecisionService:
             PERSON_INSTRUCTION, build_completion, extract_tasks, task_instruction, with_instruction,
         )
 
-        messages = body.get("messages")
-        if not isinstance(messages, list) or not messages:
+        original_messages = body.get("messages")
+        if not isinstance(original_messages, list) or not original_messages:
             raise ValueError("messages must be a nonempty list")
+        messages = original_messages
+        spilled = 0
         if self.frame_store is not None and self._frame_base:
-            messages = spill_message_images(messages, self.frame_store, self._frame_base)
+            messages, spilled = spill_message_images(original_messages, self.frame_store, self._frame_base)
         tasks = extract_tasks(body)
 
         def judge(conversation: list) -> dict:
@@ -255,34 +263,39 @@ class DecisionService:
             probabilities = result.get("probabilities", {})
             return probabilities.get("A", 0.0) >= probabilities.get("B", 0.0)
 
-        started = time.perf_counter()
         # Put the person read and every task read in ONE batched upstream request,
         # so the whole judgment is a single HTTP round trip. Servers without the
         # batched endpoint fall back to concurrent per-conversation reads.
-        task_instructions = [task_instruction(name) for name in tasks]
-        conversations = [
-            with_instruction(messages, instruction)
-            for instruction in [PERSON_INSTRUCTION, *task_instructions]
-        ]
-        mode = "fanout"
-        http_requests = 0
-        outcomes = []
-        if self._score_labels_batch is not None:
-            try:
-                outcomes = list(self._score_labels_batch(conversations, ["A", "B"]))
-                http_requests = 1
-                mode = "batch"
-            except Exception as error:
-                if not getattr(error, "batch_not_supported", False):
-                    raise
-                self._score_labels_batch = None  # probe once, then stick to fan-out
-        if mode != "batch":
+        def run(read_messages: list):
+            conversations = [
+                with_instruction(read_messages, instruction)
+                for instruction in [PERSON_INSTRUCTION, *[task_instruction(name) for name in tasks]]
+            ]
+            if self._score_labels_batch is not None:
+                try:
+                    results = list(self._score_labels_batch(conversations, ["A", "B"]))
+                    return results, "batch", 1, 1
+                except Exception as error:
+                    if not getattr(error, "batch_not_supported", False):
+                        raise
+                    self._score_labels_batch = None  # probe once, then stick to fan-out
             workers = min(len(conversations), 32)
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                outcomes = list(pool.map(judge, conversations))
-            http_requests = len(conversations)
-        else:
-            workers = 1
+                return list(pool.map(judge, conversations)), "fanout", workers, len(conversations)
+
+        started = time.perf_counter()
+        try:
+            outcomes, mode, workers, http_requests = run(messages)
+        except Exception as error:
+            if not (spilled and "/frames/" in str(error)):
+                raise
+            logger.warning(
+                "vLLM could not fetch frames from %s (%s); retrying with inline images",
+                self._frame_base, error,
+            )
+            self._frame_base = None  # this address is not reachable from the vLLM server
+            outcomes, mode, workers, http_requests = run(original_messages)
+            http_requests += 1  # the failed frame-URL attempt still hit the server
         total_seconds = time.perf_counter() - started
 
         output = {
@@ -624,7 +637,7 @@ def help_document(model_name: str) -> dict:
                 },
             },
             "task_source": "任务名优先取顶层 tasks，其次从 messages 里的“任务名称：X”解析，都没有则用内置默认集合。",
-            "prefix_cache": "system + 图像 + 任务清单在前，逐任务指令拼在最后，同一请求里的“是否有人”与全部任务共享同一段前缀；开启 vLLM --enable-prefix-caching（多图还需 --limit-mm-per-prompt image=20）后，后续请求（如追加式帧历史：旧帧不变、新帧后）可命中 APC。图像以 data URI/本地路径传入时转存为 /frames/<id>，vLLM 只抓取一次，不逐任务重传。响应 usage.prompt_tokens_details.cached_tokens / telejev.cached_tokens 可用于验证是否命中。",
+            "prefix_cache": "system + 图像 + 任务清单在前，逐任务指令拼在最后，同一请求里的“是否有人”与全部任务共享同一段前缀；开启 vLLM --enable-prefix-caching（多图还需 --limit-mm-per-prompt image=20）后，后续请求（如追加式帧历史：旧帧不变、新帧后）可命中 APC。设置 --public-url 时，图像会转存为 /frames/<id>，vLLM 只抓取一次，不逐任务重传；未设置则内联 base64。响应 usage.prompt_tokens_details.cached_tokens / telejev.cached_tokens 可用于验证是否命中。",
         },
         "notes": [
             "除 /v1/chat/completions 外，其余 POST 端点需要 body 中包含 state 与 criteria（或单条决策行）。",
@@ -740,7 +753,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--public-url", dest="public_url", default=None,
-                        help="URL at which the vLLM backend can reach this server; enables frame-URL image spilling")
+                        help="URL at which the vLLM server can reach this one; enables frame-URL image spilling")
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--log-level", default="info", choices=("debug", "info", "warning", "error"),
                         help="debug logs every upstream call and image spill; info logs one line per request")
@@ -765,10 +778,10 @@ def main() -> None:
         logger.info("vLLM backend: %s model=%s", url, backend.model)
         frame_store = FrameStore()
         frame_base = args.public_url.rstrip("/") if args.public_url else None
-        if frame_base is None and _server_is_local(url):
-            frame_base = f"http://127.0.0.1:{args.port}"
         if frame_base:
             logger.info("Frame URLs: %s/frames/<id> (vLLM fetches each image once)", frame_base)
+        else:
+            logger.info("Image spilling off; pass --public-url if the vLLM server can fetch this one")
         service = DecisionService(
             backend.score_row, backend.model, backend.score_batch, backend.generate, backend.score_labels,
             backend.score_labels_batch, frame_store, frame_base,

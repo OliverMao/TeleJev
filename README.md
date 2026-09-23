@@ -214,7 +214,7 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
 - `completion_tokens` 为 0（内部不生成 token）；概率放在额外字段 `telejev`，OpenAI 客户端会自动忽略。
 - 需 `--backend vllm`（复用服务端 tokenizer / 前缀缓存）。
 - **一次 HTTP 请求判完全部任务**：优先走 vLLM 的 `/v1/chat/completions/batch`（较新 vLLM 自带）：一次请求同时带上“是否有人”和全部任务；服务端没有该端点时自动退回并发逐个读取，结果不变。响应里的 `telejev.requests` 是模型读取次数（1 + 任务数），`telejev.http_requests` 是真实上游 HTTP 请求数（批量模式下为 1），`telejev.mode` 为 `batch` / `fanout`。
-- **防止图像重复上传**：图像以 data URI / 本地路径传入时，会先存入本服务的 `/frames/<id>`，上游凭 URL 只抓取一次（vLLM 会按 URL 缓存），不再逐任务重复上传 base64。vLLM 与本服务不同机时用 `--public-url http://<本服务可达地址>:<port>` 告知回拉地址。
+- **防止图像重复上传（可选）**：给 `serve.py` 加 `--public-url http://<vLLM 能访问到的本机地址>:<port>` 后，data URI / 本地路径的图像会先存进本服务的 `/frames/<id>`，上游凭 URL 只抓取一次（vLLM 按 URL 缓存），不再逐任务重复上传 base64。默认不转存（直接内联）；若上游抓不到该 URL，服务会自动退回内联并关闭转存。
 - **前缀缓存（APC）**：请求里 `system + 图像 + 任务清单` 在前、逐任务指令拼在最后，同一批量请求里的“是否有人”与全部任务共享同一段前缀；开启 vLLM `--enable-prefix-caching`（多图还需 `--limit-mm-per-prompt image=20`）后，后续请求可命中已缓存前缀（**追加式帧历史**：旧帧不变、新帧往尾部加，前缀最稳定）。用 `usage.prompt_tokens_details.cached_tokens` 或 `telejev.cached_tokens` 可直接验证命中量。
 
 ### 批量判定（多任务）
@@ -266,7 +266,7 @@ curl -X POST http://127.0.0.1:8000/decide-batch \
 
 `timing.total_seconds` 是**从服务端拿到请求数据到推理完成**的时间（不含客户端与服务器之间的网络传输）；细分：`image_seconds`（图像解码）、`encode_seconds`（prompt 编码）、`prefill_seconds`（图像+state 前向）、`suffix_seconds`（判据前向）。每个任务不再单独计时（shared 模式下它们共享同一次判据前向）。
 
-`--backend vllm` 时，`/decide-batch` 会把全部 criteria 放进**一次** `/v1/chat/completions/batch` 请求（图像同样转存 `/frames/<id>`、只抓一次）；服务端无该端点时自动退回并发逐个读取。`timing.mode` 为 `batch` / `fanout`，`timing.requests` 为真实上游请求数。
+`--backend vllm` 时，`/decide-batch` 会把全部 criteria 放进**一次** `/v1/chat/completions/batch` 请求（设置 `--public-url` 时图像还会转存 `/frames/<id>`、只抓一次，否则内联）；服务端无该端点时自动退回并发逐个读取。`timing.mode` 为 `batch` / `fanout`，`timing.requests` 为真实上游请求数。
 
 ### 前端测试页
 
