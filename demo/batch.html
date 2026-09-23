@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vLLM · /v1/chat/completions/batch 直测</title>
+<style>
+  :root { color-scheme: light dark; --line: #d0d7de; --accent: #2563eb; --ok: #16a34a; --bad: #dc2626; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px; font: 15px/1.5 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; max-width: 1000px; margin-inline: auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #666; margin: 0 0 20px; font-size: 13px; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin: 0 0 16px; }
+  legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 8px 0 4px; }
+  textarea, input[type="text"] { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font: inherit; background: transparent; color: inherit; }
+  textarea { resize: vertical; }
+  .server { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+  .server input { flex: 1 1 240px; }
+  button { padding: 7px 14px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.ghost { padding: 4px 10px; font-size: 13px; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 20px; }
+  .status { font-size: 13px; }
+  .status.ok { color: var(--ok); }
+  .status.bad { color: var(--bad); }
+  #result { display: none; }
+  .verdict { font-size: 24px; font-weight: 800; margin-bottom: 8px; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .chip { padding: 4px 12px; border-radius: 999px; background: var(--bad); color: #fff; font-size: 13px; }
+  .chip.empty { background: #0002; color: #666; }
+  .prob { display: grid; grid-template-columns: 140px 1fr 56px 1fr 56px; gap: 8px; align-items: center; font-size: 13px; margin-bottom: 6px; }
+  .bar { height: 14px; background: #0001; border-radius: 7px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); }
+  pre { background: #0000000d; border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow: auto; font-size: 12.5px; }
+  .muted { color: #666; font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>vLLM · /v1/chat/completions/batch 直测</h1>
+  <p class="sub">不经过 TeleJev serve.py，直接向 vLLM 发 <b>一次</b> 批量请求：「是否有人」+ 每个任务各一组对话，一次拿回全部 A/B logprob。</p>
+
+  <div class="server">
+    <label style="margin:0" for="base">vLLM 地址</label>
+    <input id="base" type="text" value="http://127.0.0.1:8111">
+    <label style="margin:0" for="model">model</label>
+    <input id="model" type="text" placeholder="留空则从 /v1/models 取" style="flex:0 1 260px">
+    <button id="probe" class="ghost">检查 /v1/models</button>
+    <span id="status" class="status"></span>
+  </div>
+
+  <fieldset>
+    <legend>system 提示词</legend>
+    <textarea id="systemText" rows="8">你是一名实时视频流助手，逐帧观察连续的摄像头画面，并按要求判定当前是否存在指定的监测行为。
+
+【最重要的判定原则】
+你输出的结论必须且只能反映【最后一帧】的状态；历史帧仅作为连续运动趋势的辅助参考。
+- 不要累计、沿用、记忆历史帧中已结束的行为。
+- 只输出一个大写字母 A 或 B，不要输出其它任何内容。</textarea>
+  </fieldset>
+
+  <fieldset>
+    <legend>user 提示词（任务清单，会追加到每组对话）</legend>
+    <textarea id="userText" rows="10">【本摄像头的监测任务清单】
+请只判定下列行为，并严格按每组对话末尾的指令只输出 A 或 B：
+
+1. 任务名称：摔倒
+   判定标准：只要【最后一帧】人体出现趴卧在地、双膝跪伏、平躺、侧卧或直接坐在地板上（无座椅支撑），都要判定为“摔倒”；最后一帧已站起则【不报】。
+2. 任务名称：挥手
+   判定标准：【最后一帧】手部有大幅度挥动（手腕超过头顶）；不要把打电话误识别为挥手。
+3. 任务名称：捂胸口
+   判定标准：【最后一帧】手部按在胸口/胸前区域，可能伴随身体前倾或不适姿态；手已放下则【不报】。</textarea>
+    <label for="tasks">tasks（逗号分隔；“是否有人”始终作为第一组对话）</label>
+    <input id="tasks" type="text" value="摔倒, 挥手, 捂胸口">
+  </fieldset>
+
+  <fieldset>
+    <legend>图像（可选，同一张图会放进每一组对话）</legend>
+    <input type="file" id="imageFile" accept="image/*">
+    <button id="sampleImage" class="ghost">加载示例图 fall.png</button>
+    <button id="clearImage" class="ghost">清除图像</button>
+    <div id="imageInfo" class="muted">未选择图像</div>
+    <img id="imagePreview" alt="" style="display:none;max-width:260px;max-height:200px;margin-top:8px;border-radius:6px;border:1px solid var(--line)">
+  </fieldset>
+
+  <div class="actions">
+    <button id="run" class="primary">调用 /v1/chat/completions/batch（1 次请求）</button>
+  </div>
+
+  <section id="result">
+    <div class="verdict" id="verdict"></div>
+    <div class="chips" id="chips"></div>
+    <div id="timing" class="muted" style="margin-bottom:12px"></div>
+    <h3 style="font-size:13px;margin:14px 0 6px">各对话概率（A=命中 / B=未命中）</h3>
+    <div id="probs"></div>
+    <h3 style="font-size:13px;margin:14px 0 6px">请求体（messages 为 N 组对话）</h3>
+    <pre id="request"></pre>
+    <h3 style="font-size:13px;margin:14px 0 6px">原始响应</h3>
+    <pre id="raw"></pre>
+  </section>
+
+<script>
+const BASE = () => document.getElementById("base").value.replace(/\/+$/, "");
+const $ = (id) => document.getElementById(id);
+const PERSON_INSTRUCTION = "只判断【最后一帧】画面中是否有人：有人只输出 A，没有人只输出 B。不要输出其它任何内容。";
+const taskInstruction = (name) => `只判断【最后一帧】是否存在「${name}」这一行为：存在只输出 A，不存在只输出 B。不要输出其它任何内容。`;
+const LABELS = ["A", "B"];
+
+let imageData = null;
+
+function setStatus(text, ok) {
+  const el = $("status");
+  el.textContent = text;
+  el.className = "status " + (ok === undefined ? "" : ok ? "ok" : "bad");
+}
+
+function readout(choice) {
+  const top = (choice.logprobs && choice.logprobs.content && choice.logprobs.content[0] && choice.logprobs.content[0].top_logprobs) || [];
+  const logprobs = {};
+  for (const item of top) {
+    const key = String(item.token || "").trim().toUpperCase();
+    if (!LABELS.includes(key)) continue;
+    if (!(key in logprobs) || item.logprob > logprobs[key]) logprobs[key] = item.logprob;
+  }
+  const chosen = String((choice.logprobs && choice.logprobs.content && choice.logprobs.content[0] && choice.logprobs.content[0].token) || "").trim().toUpperCase();
+  if (chosen && !(chosen in logprobs)) logprobs[chosen] = choice.logprobs.content[0].logprob;
+  const keys = Object.keys(logprobs);
+  if (!keys.length) return null;
+  const maximum = Math.max(...keys.map((key) => logprobs[key]));
+  let total = 0;
+  const probabilities = {};
+  for (const key of keys) { probabilities[key] = Math.exp(logprobs[key] - maximum); total += probabilities[key]; }
+  for (const key of keys) probabilities[key] /= total;
+  return { probabilities, chosen };
+}
+
+function taskNames() {
+  return $("tasks").value.split(/[,，\s]+/).filter(Boolean);
+}
+
+function buildConversations() {
+  const tasks = taskNames();
+  const instructions = [PERSON_INSTRUCTION, ...tasks.map(taskInstruction)];
+  const conversations = instructions.map((instruction) => {
+    const parts = [];
+    if (imageData) parts.push({ type: "image_url", image_url: { url: imageData } });
+    parts.push({ type: "text", text: $("userText").value + "\n\n" + instruction });
+    return [
+      { role: "system", content: $("systemText").value },
+      { role: "user", content: parts },
+    ];
+  });
+  return { tasks, instructions, conversations };
+}
+
+function bar(label, hitText, missText, probabilities) {
+  const a = probabilities.A || 0, b = probabilities.B || 0;
+  return `<div class="prob">
+    <span>${label}</span>
+    <div class="bar"><i style="width:${(a * 100).toFixed(1)}%"></i></div>
+    <span>${hitText} ${(a * 100).toFixed(1)}%</span>
+    <div class="bar"><i style="width:${(b * 100).toFixed(1)}%;background:#94a3b8"></i></div>
+    <span>${missText} ${(b * 100).toFixed(1)}%</span>
+  </div>`;
+}
+
+async function run() {
+  const { tasks, instructions, conversations } = buildConversations();
+  const body = {
+    messages: conversations,
+    max_tokens: 1,
+    temperature: 0,
+    logprobs: true,
+    top_logprobs: 20,
+    chat_template_kwargs: { enable_thinking: false },
+  };
+  const model = $("model").value.trim();
+  if (model) body.model = model;
+
+  $("result").style.display = "block";
+  $("verdict").textContent = "请求中…";
+  $("chips").innerHTML = "";
+  $("probs").innerHTML = "";
+  $("request").textContent = JSON.stringify({ ...body, messages: conversations.map((conv) => conv.map((msg) => ({
+    ...msg, content: Array.isArray(msg.content) ? msg.content.map((part) => part.type === "image_url" ? { type: "image_url", image_url: { url: "<data URI>" } } : part) : msg.content,
+  }))) }, null, 2);
+  $("raw").textContent = "";
+  setStatus("");
+
+  const started = performance.now();
+  try {
+    const response = await fetch(BASE() + "/v1/chat/completions/batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const text = await response.text();
+    const elapsed = (performance.now() - started) / 1000;
+    let data;
+    try { data = JSON.parse(text); } catch (error) { throw new Error(text.slice(0, 300)); }
+    if (!response.ok) throw new Error(JSON.stringify(data).slice(0, 400));
+    $("raw").textContent = JSON.stringify(data, null, 2);
+
+    const choices = (data.choices || []).slice().sort((a, b) => (a.index || 0) - (b.index || 0));
+    const readouts = choices.map(readout);
+    if (readouts.some((item) => item === null)) {
+      $("verdict").textContent = "部分 choice 不含 A/B logprob（服务端可能未按启用 enable_thinking=False 渲染）";
+      setStatus("缺少 A/B logprob", false);
+      return;
+    }
+
+    const person = readouts[0];
+    const hasPerson = (person.probabilities.A || 0) >= (person.probabilities.B || 0);
+    const violations = tasks.filter((name, index) => {
+      const item = readouts[index + 1].probabilities;
+      return (item.A || 0) >= (item.B || 0);
+    });
+    $("verdict").textContent = JSON.stringify({ has_person: hasPerson ? 1 : 0, violations });
+    $("chips").innerHTML = violations.length
+      ? violations.map((name) => `<span class="chip">${name}</span>`).join("")
+      : '<span class="chip empty">无命中行为</span>';
+
+    const usage = data.usage || {};
+    $("timing").textContent = `1 次上游 HTTP 请求 · ${conversations.length} 组对话 · 耗时 ${elapsed.toFixed(4)} s · ` +
+      `prompt_tokens ${usage.prompt_tokens ?? "?"} · completion_tokens ${usage.completion_tokens ?? "?"} · ` +
+      `cached_tokens ${(usage.prompt_tokens_details && usage.prompt_tokens_details.cached_tokens) ?? 0}`;
+
+    $("probs").innerHTML =
+      bar("是否有人", "有人", "无人", person.probabilities) +
+      tasks.map((name, index) => bar(name, "命中", "未命中", readouts[index + 1].probabilities)).join("");
+    setStatus("OK", true);
+  } catch (error) {
+    $("verdict").textContent = "失败";
+    $("raw").textContent = String(error);
+    setStatus(String(error).slice(0, 160), false);
+  }
+}
+
+function showImage(dataUrl, label) {
+  imageData = dataUrl;
+  $("imageInfo").textContent = label;
+  const preview = $("imagePreview");
+  preview.src = dataUrl;
+  preview.style.display = "block";
+}
+
+$("imageFile").addEventListener("change", (event) => {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => showImage(reader.result, `${file.name}（${(file.size / 1024).toFixed(0)} KB）`);
+  reader.readAsDataURL(file);
+});
+
+$("sampleImage").addEventListener("click", async () => {
+  try {
+    const response = await fetch("fall.png");
+    const blob = await response.blob();
+    const reader = new FileReader();
+    reader.onload = () => showImage(reader.result, "fall.png（示例图）");
+    reader.readAsDataURL(blob);
+  } catch (error) {
+    setStatus("加载示例图失败：" + error, false);
+  }
+});
+
+$("clearImage").addEventListener("click", () => {
+  imageData = null;
+  $("imageInfo").textContent = "未选择图像";
+  $("imagePreview").style.display = "none";
+});
+
+$("probe").addEventListener("click", async () => {
+  try {
+    const response = await fetch(BASE() + "/v1/models");
+    const data = await response.json();
+    const ids = (data.data || []).map((item) => item.id);
+    if (!$("model").value.trim() && ids.length) $("model").value = ids[0];
+    setStatus(ids.length ? `可用模型：${ids.join(", ")}` : "无模型", true);
+  } catch (error) {
+    setStatus("连接失败：" + error, false);
+  }
+});
+
+$("run").addEventListener("click", run);
+</script>
+</body>
+</html>
