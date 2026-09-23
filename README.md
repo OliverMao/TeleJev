@@ -88,6 +88,7 @@ python serve.py --backend vllm \
 - **Jev 式读取**：`max_tokens=1` + `logprobs`，只对选项字母归一化（prefill-only，不生成）
 - **生成**：同一服务的普通 `max_tokens` 路径
 - **多判据**：把“是否有人”和全部任务放进 vLLM 的 `/v1/chat/completions/batch`，**一次 HTTP 请求**判完；无该端点的旧版 vLLM 自动退回并发逐个读取
+- **日志**：默认 INFO，每个请求一行（路径/状态/耗时），`/v1/chat/completions` 与 `/decide-batch` 额外输出 `tasks` / `http_requests` / `mode` / 缓存命中；`--log-level debug` 可看上游每次 POST、批量对话数与图像转存
 
 直接对比 Jev 与完整自回归：
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import mimetypes
 import threading
 import time
@@ -26,6 +27,8 @@ from pathlib import Path
 from .autoregressive import parse_output
 from .core import LETTERS, direct_messages
 from .prompt import DIRECT_SYSTEM, GENERATION_SYSTEM, build_generation_text, task_standard
+
+logger = logging.getLogger("telejev.vllm")
 
 
 class VLLMError(RuntimeError):
@@ -84,10 +87,12 @@ class VLLMBackend:
                 body = json.loads(response.read())
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", "replace")[:500]
+            logger.warning("POST %s -> HTTP %s: %s", path, error.code, detail[:200])
             if error.code in unsupported:
                 raise BatchNotSupportedError(f"vLLM HTTP {error.code} for {path}: {detail}") from error
             raise VLLMError(f"vLLM HTTP {error.code}: {detail}") from error
         elapsed = time.perf_counter() - started
+        logger.debug("POST %s payload=%dB -> %.4fs", path, len(data), elapsed)
         with self._count_lock:
             self.requests += 1
         return body, elapsed
@@ -342,6 +347,7 @@ class VLLMBackend:
             "chat_template_kwargs": {"enable_thinking": False},
         }
         body, elapsed = self._post("/v1/chat/completions/batch", payload, unsupported=(404, 405))
+        logger.debug("batched label readout: %d conversations -> %.4fs", len(conversations), elapsed)
         choices = body.get("choices")
         if not isinstance(choices, list) or len(choices) != len(conversations):
             raise VLLMError("vLLM batch response did not include one choice per conversation")

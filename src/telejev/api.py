@@ -34,6 +34,7 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import mimetypes
 import re
 import threading
@@ -44,6 +45,8 @@ from pathlib import Path
 
 from .core import LETTERS, validate_row
 from .prompt import task_standard
+
+logger = logging.getLogger("telejev.api")
 
 ROW_KEYS = ("id", "state", "question", "options", "image")
 
@@ -111,6 +114,7 @@ def _server_is_local(url: str) -> bool:
 def spill_message_images(messages: list, store: FrameStore, base: str) -> list:
     """Copy messages, replacing data-URI/local image parts with stored frame URLs."""
     out = []
+    spilled = 0
     for message in messages:
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, list):
@@ -127,8 +131,11 @@ def spill_message_images(messages: list, store: FrameStore, base: str) -> list:
                     frame = store.put(payload, content_type)
                     part = {**part, "image_url": {**image_url, "url": f"{base}/frames/{frame}"}}
                     changed = True
+                    spilled += 1
             parts.append(part)
         out.append({**message, "content": parts} if changed else message)
+    if spilled:
+        logger.debug("spilled %d image(s) to %s/frames", spilled, base)
     return out
 
 
@@ -205,6 +212,10 @@ class DecisionService:
         with self._lock:
             results, timing = self._batch(state, image, criteria)
         timing["total_seconds"] = time.perf_counter() - started
+        logger.info(
+            "decide-batch criteria=%d mode=%s total=%.4fs",
+            len(results), timing.get("mode", "local"), timing["total_seconds"],
+        )
         return {"results": [canonical_decision(result) for result in results], "timing": timing}
 
     def generate(self, body: dict) -> dict:
@@ -313,6 +324,10 @@ class DecisionService:
         }
         if batch_usage is not None:
             detail["batch_seconds"] = float(batch_usage.get("seconds", 0.0) or 0.0)
+        logger.info(
+            "chat tasks=%d http_requests=%d mode=%s total=%.4fs prompt_tokens=%d cached_tokens=%d",
+            len(tasks), http_requests, mode, total_seconds, prompt_tokens, cached_tokens,
+        )
         return build_completion(self.model_name, output, detail)
 
 
@@ -615,6 +630,7 @@ def help_document(model_name: str) -> dict:
             "除 /v1/chat/completions 外，其余 POST 端点需要 body 中包含 state 与 criteria（或单条决策行）。",
             "image 支持 data URI、http(s) URL、本地路径；仅当模型暴露多模态 processor 时会真正送入。",
             "Jev 式（/decide, /decide-batch, /v1/chat/completions）不生成 token；/generate 为完整自回归基线。",
+            "日志：默认 INFO，每个请求一行（路径/状态/耗时），/v1/chat/completions 与 /decide-batch 额外输出 tasks/http_requests/mode/缓存命中；--log-level debug 可看上游每次 POST 与图像转存。",
             "所有响应为 UTF-8 JSON；输出格式固定，无需 JSON 修复。",
             "当前后端：" + model_name,
         ],
@@ -627,7 +643,7 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args) -> None:  # silence default stderr logging
         pass
 
-    def _send(self, status: int, payload: dict) -> None:
+    def _send(self, status: int, payload: dict) -> int:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -635,6 +651,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(data)
+        return status
 
     def do_OPTIONS(self) -> None:
         self.send_response(204)
@@ -643,7 +660,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
 
-    def _send_bytes(self, content_type: str, payload: bytes) -> None:
+    def _send_bytes(self, content_type: str, payload: bytes) -> int:
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
@@ -651,15 +668,17 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(payload)
+        return 200
 
     def do_GET(self) -> None:
+        started = time.perf_counter()
         path = self.path.split("?", 1)[0]
         if path == "/health":
-            self._send(200, {"status": "ok", "model": self.service.model_name})
+            status = self._send(200, {"status": "ok", "model": self.service.model_name})
         elif path == "/help":
-            self._send(200, help_document(self.service.model_name))
+            status = self._send(200, help_document(self.service.model_name))
         elif path == "/v1/models":
-            self._send(200, {
+            status = self._send(200, {
                 "object": "list",
                 "data": [{"id": self.service.model_name, "object": "model", "owned_by": "telejev"}],
             })
@@ -668,30 +687,37 @@ class _Handler(BaseHTTPRequestHandler):
             if self.service.frame_store is not None:
                 item = self.service.frame_store.get(path[len("/frames/"):])
             if item is None:
-                self._send(404, {"error": {"message": "unknown frame", "type": "invalid_request_error"}})
+                status = self._send(404, {"error": {"message": "unknown frame", "type": "invalid_request_error"}})
             else:
                 content_type, payload = item
-                self._send_bytes(content_type, payload)
+                status = self._send_bytes(content_type, payload)
         else:
-            self._send(404, {"error": {"message": f"unknown path {self.path}", "type": "invalid_request_error"}})
+            status = self._send(404, {"error": {"message": f"unknown path {self.path}", "type": "invalid_request_error"}})
+        level = logging.DEBUG if status == 200 and path.startswith(("/health", "/v1/models", "/frames/")) else logging.INFO
+        logger.log(level, "GET %s -> %s %.4fs", self.path, status, time.perf_counter() - started)
 
     def do_POST(self) -> None:
-        if self.path not in {"/decide", "/decide-batch", "/generate", "/v1/chat/completions"}:
-            self._send(404, {"error": {"message": f"unknown path {self.path}", "type": "invalid_request_error"}})
-            return
+        started = time.perf_counter()
+        status = 400
         try:
+            if self.path not in {"/decide", "/decide-batch", "/generate", "/v1/chat/completions"}:
+                status = self._send(404, {"error": {"message": f"unknown path {self.path}", "type": "invalid_request_error"}})
+                return
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
             if self.path == "/decide":
-                self._send(200, self.service.decide(body))
+                status = self._send(200, self.service.decide(body))
             elif self.path == "/decide-batch":
-                self._send(200, self.service.decide_batch(body))
+                status = self._send(200, self.service.decide_batch(body))
             elif self.path == "/generate":
-                self._send(200, self.service.generate(body))
+                status = self._send(200, self.service.generate(body))
             else:
-                self._send(200, self.service.openai_chat(body))
+                status = self._send(200, self.service.openai_chat(body))
         except Exception as error:  # surface a stable error envelope
-            self._send(400, {"error": {"message": str(error), "type": "invalid_request_error"}})
+            logger.warning("POST %s failed: %s", self.path, error, exc_info=logger.isEnabledFor(logging.DEBUG))
+            status = self._send(400, {"error": {"message": str(error), "type": "invalid_request_error"}})
+        finally:
+            logger.info("POST %s -> %s %.4fs", self.path, status, time.perf_counter() - started)
 
 
 def serve(service: DecisionService, host: str = "127.0.0.1", port: int = 8000) -> ThreadingHTTPServer:
@@ -716,8 +742,15 @@ def main() -> None:
     parser.add_argument("--public-url", dest="public_url", default=None,
                         help="URL at which the vLLM backend can reach this server; enables frame-URL image spilling")
     parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--log-level", default="info", choices=("debug", "info", "warning", "error"),
+                        help="debug logs every upstream call and image spill; info logs one line per request")
     parser.add_argument("--fake", action="store_true", help="Serve a stub scorer; no GPU or model required")
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper()),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
     if args.fake:
         service = DecisionService(
@@ -729,24 +762,24 @@ def main() -> None:
 
         url = args.server_url or "http://127.0.0.1:30000"
         backend = VLLMBackend(url, args.served_model or args.model)
-        print(f"vLLM backend: {url} model={backend.model}", flush=True)
+        logger.info("vLLM backend: %s model=%s", url, backend.model)
         frame_store = FrameStore()
         frame_base = args.public_url.rstrip("/") if args.public_url else None
         if frame_base is None and _server_is_local(url):
             frame_base = f"http://127.0.0.1:{args.port}"
         if frame_base:
-            print(f"Frame URLs: {frame_base}/frames/<id> (vLLM fetches each image once)", flush=True)
+            logger.info("Frame URLs: %s/frames/<id> (vLLM fetches each image once)", frame_base)
         service = DecisionService(
             backend.score_row, backend.model, backend.score_batch, backend.generate, backend.score_labels,
             backend.score_labels_batch, frame_store, frame_base,
         )
     else:
         score_fn, batch_fn, generate_fn, metadata = load_model_scorers(args.model, args.max_tokens)
-        print(f"Loaded model: multimodal={metadata['multimodal']}", flush=True)
+        logger.info("Loaded model: multimodal=%s", metadata["multimodal"])
         service = DecisionService(score_fn, args.model, batch_fn, generate_fn)
 
     httpd = serve(service, args.host, args.port)
-    print(f"Serving '{service.model_name}' on http://{args.host}:{args.port}", flush=True)
+    logger.info("Serving '%s' on http://%s:%s (log level %s)", service.model_name, args.host, args.port, args.log_level)
     httpd.serve_forever()
 
 
