@@ -82,22 +82,15 @@ def extract_tasks(body: dict) -> list[str]:
 
 
 def with_instruction(messages: list, instruction: str) -> list:
-    """Append an instruction to the last user turn (keeps a single user message).
+    """Append the instruction as a final user turn.
 
-    Appending to the same turn keeps ``system + images + user text`` as a stable
+    A separate turn is followed far more reliably than text appended to the
+    client's own user content, which often asks for a different output format
+    (JSON, prose). It also keeps ``system + images + user text`` as a stable
     prefix so the server's prefix cache is reused across the per-task requests.
     """
-    if not messages:
-        return [{"role": "user", "content": instruction}]
     out = [dict(message) for message in messages]
-    last = out[-1]
-    content = last.get("content")
-    if isinstance(content, str):
-        last["content"] = content + "\n\n" + instruction
-    elif isinstance(content, list):
-        last["content"] = content + [{"type": "text", "text": "\n\n" + instruction}]
-    else:
-        out.append({"role": "user", "content": instruction})
+    out.append({"role": "user", "content": instruction})
     return out
 
 

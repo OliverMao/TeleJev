@@ -201,7 +201,7 @@ class DecisionService:
             stats["tasks"] = tasks
             stats["cached_tokens"] = cached_tokens
             now = time.perf_counter()
-            if self._log_interval > 0 and now - self._log_since < self._log_interval:
+            if self._log_interval > 0 and now - self._log_since < self._log_interval and stats["count"] > 1:
                 return
             count = stats["count"]
             average = stats["total"] / count if count else 0.0
@@ -358,6 +358,7 @@ class DecisionService:
             "violation_probabilities": {
                 name: outcomes[index + 1].get("probabilities", {}) for index, name in enumerate(tasks)
             },
+            "raw_tokens": [result.get("raw_token") for result in outcomes],
             "requests": len(outcomes),
             "http_requests": http_requests,
             "mode": mode,
@@ -674,7 +675,7 @@ def help_document(model_name: str) -> dict:
                 },
             },
             "task_source": "任务名优先取顶层 tasks，其次从 messages 里的“任务名称：X”解析，都没有则用内置默认集合。",
-            "prefix_cache": "system + 图像 + 任务清单在前，逐任务指令拼在最后，同一请求里的“是否有人”与全部任务共享同一段前缀；开启 vLLM --enable-prefix-caching（多图还需 --limit-mm-per-prompt image=20）后，后续请求（如追加式帧历史：旧帧不变、新帧后）可命中 APC。设置 --public-url 时，图像会转存为 /frames/<id>，vLLM 只抓取一次，不逐任务重传；未设置则内联 base64。响应 usage.prompt_tokens_details.cached_tokens / telejev.cached_tokens 可用于验证是否命中。",
+            "prefix_cache": "system + 图像 + 任务清单在前，逐任务指令作为最后一个 user 轮在后，同一请求里的“是否有人”与全部任务共享同一段前缀；开启 vLLM --enable-prefix-caching（多图还需 --limit-mm-per-prompt image=20）后，后续请求（如追加式帧历史：旧帧不变、新帧后）可命中 APC。设置 --public-url 时，图像会转存为 /frames/<id>，vLLM 只抓取一次，不逐任务重传；未设置则内联 base64。响应 usage.prompt_tokens_details.cached_tokens / telejev.cached_tokens 可用于验证是否命中。",
         },
         "notes": [
             "除 /v1/chat/completions 外，其余 POST 端点需要 body 中包含 state 与 criteria（或单条决策行）。",

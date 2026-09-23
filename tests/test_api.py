@@ -240,8 +240,9 @@ def main() -> None:
             ],
         })
         assert spill["telejev"]["mode"] == "batch"
-        parts = seen_conversations[-1][0][-1]["content"]
-        frame_url = parts[0]["image_url"]["url"]
+        conversation = seen_conversations[-1][0]
+        image_message = next(message for message in conversation if isinstance(message.get("content"), list))
+        frame_url = image_message["content"][0]["image_url"]["url"]
         assert frame_url.startswith(base + "/frames/"), frame_url
         with urllib.request.urlopen(frame_url) as response:
             assert response.read() == base64.b64decode(TINY_PNG.split(",", 1)[1])
