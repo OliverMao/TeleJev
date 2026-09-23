@@ -2,9 +2,9 @@
 
 Two ways to decide, both reading the model directly:
 
-- **Jev-style** (``score_direct`` / ``score_batch`` / ``SGLangBackend.score_batch``):
+- **Jev-style** (``score_direct`` / ``score_batch`` / ``VLLMBackend.score_batch``):
   one prefill-only forward, read the declared option logits. No token generation.
-- **Autoregressive** (``generate_answers`` / ``SGLangBackend.generate``): a greedy
+- **Autoregressive** (``generate_answers`` / ``VLLMBackend.generate``): a greedy
   generation baseline that emits the final ``{"has_person", "violations"}`` object.
 
 Typical use::
@@ -17,7 +17,7 @@ Typical use::
 Serving::
 
     python serve.py --model Qwen/Qwen3.5-4B          # local torch backend
-    python serve.py --backend vllm --server-url ...  # SGLang/vLLM backend
+    python serve.py --backend vllm --server-url ...  # vLLM backend
 
 Everything here is importable without loading torch; heavy imports happen lazily
 inside the functions that need them.
@@ -38,7 +38,7 @@ from .prompt import (
     task_standard,
 )
 from .shared import score_shared
-from .sglang_backend import SGLangBackend, SGLangError
+from .vllm_backend import VLLMBackend, VLLMError
 
 __version__ = "0.1.0"
 
@@ -56,9 +56,9 @@ __all__ = [
     "generate_answers",
     "parse_output",
     "build_messages",
-    # OpenAI-compatible backend (SGLang / vLLM)
-    "SGLangBackend",
-    "SGLangError",
+    # OpenAI-compatible backend (vLLM)
+    "VLLMBackend",
+    "VLLMError",
     # serving
     "DecisionService",
     "serve",

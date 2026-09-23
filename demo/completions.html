@@ -42,7 +42,7 @@
 </head>
 <body>
   <h1>TeleJev · /v1/chat/completions 测试</h1>
-  <p class="sub">像用普通模型一样：填提示词、可选附图像，调用一次 completions，查看 <code>{"has_person": 0|1, "violations": [...]}</code>。服务端需以 <code>--backend sglang|vllm</code> 启动。</p>
+  <p class="sub">像用普通模型一样：填提示词、可选附图像，调用一次 completions，查看 <code>{"has_person": 0|1, "violations": [...]}</code>。服务端需以 <code>--backend vllm</code> 启动。</p>
 
   <div class="server">
     <label style="margin:0" for="base">服务地址</label>
@@ -204,7 +204,7 @@ async function run() {
       : '<span class="chip empty">无违规</span>';
 
     const detail = data.telejev || {};
-    $("timing").textContent = `${images.length ? images.length + " 张图像 · " : ""}请求数 ${detail.requests ?? "?"}（并发 ${detail.concurrency ?? "?"}） · 预热 ${detail.prefix_warmup ? "是" : "否"} · 缓存命中 ${detail.cached_tokens ?? 0} tokens · 总耗时 ${(detail.total_seconds ?? 0).toFixed(4)} s · 顺序和 ${(detail.sum_request_seconds ?? 0).toFixed(4)} s · prompt_tokens ${data.usage?.prompt_tokens ?? "?"}`;
+    $("timing").textContent = `${images.length ? images.length + " 张图像 · " : ""}上游 HTTP ${detail.http_requests ?? detail.requests ?? "?"} 次（${detail.mode ?? "?"}）· 模型读取 ${detail.requests ?? "?"} 次 · 缓存命中 ${detail.cached_tokens ?? 0} tokens · 总耗时 ${(detail.total_seconds ?? 0).toFixed(4)} s · 顺序和 ${(detail.sum_request_seconds ?? 0).toFixed(4)} s · prompt_tokens ${data.usage?.prompt_tokens ?? "?"}`;
     renderProbs(detail);
     $("content").textContent = content;
     $("raw").textContent = JSON.stringify(data, null, 2);

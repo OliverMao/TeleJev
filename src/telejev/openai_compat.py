@@ -2,9 +2,11 @@
 
 From the client's point of view this is a normal autoregressive model: send one
 chat request (text and/or an image) and read one assistant message. Internally we
-never generate the answer token by token -- we fan out the monitoring tasks as
-several prefill-only logprob reads to the SGLang/vLLM server (which batches them)
-and assemble the fixed structured answer:
+never generate the answer token by token -- we read the monitoring tasks with
+prefill-only logprob passes: the person read and every task read go out in a
+single batched upstream request when the server supports
+``/v1/chat/completions/batch`` (falling back to concurrent reads). The fixed
+structured answer is then assembled:
 
     {"has_person": 0 或 1, "violations": ["行为名称", ...]}
 

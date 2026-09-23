@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Compare Jev-style readout and generation, both served by SGLang.
+"""Compare Jev-style readout and generation, both served by vLLM.
 
-Start an SGLang server first, e.g.::
+Start a vLLM server first, e.g.::
 
-    python -m sglang.launch_server --model-path /path/to/model --port 30000
+    vllm serve /path/to/model --port 30000 --enable-prefix-caching
 
 Then::
 
-    python benchmarks/sglang_compare.py --base-url http://127.0.0.1:30000 --model Qwen/Qwen3.5-4B --image demo/fall.png
+    python benchmarks/vllm_compare.py --base-url http://127.0.0.1:30000 --model Qwen/Qwen3.5-4B --image demo/fall.png
 """
 
 import argparse
@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from telejev.sglang_backend import SGLangBackend  # noqa: E402
+from telejev.vllm_backend import VLLMBackend  # noqa: E402
 
 TASKS = [
     ("person", "有人", "画面中是否有人？", "画面中有人。", "画面中没有人。"),
@@ -62,10 +62,9 @@ def main() -> None:
     parser.add_argument("--image", default="demo/fall.png")
     parser.add_argument("--state", default="监控画面截图。")
     parser.add_argument("--max-new-tokens", type=int, default=None)
-    parser.add_argument("--backend-name", default="sglang", help="label only: sglang or vllm")
     args = parser.parse_args()
 
-    backend = SGLangBackend(args.base_url, args.model, backend_name=args.backend_name)
+    backend = VLLMBackend(args.base_url, args.model)
     criteria = build_criteria()
 
     results, direct_timing = backend.score_batch(args.state, args.image or None, criteria)

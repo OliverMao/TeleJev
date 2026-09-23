@@ -1,14 +1,14 @@
-"""OpenAI-compatible backend (SGLang / vLLM): Jev-style readout and generation.
+"""OpenAI-compatible backend (vLLM): Jev-style readout and generation.
 
-Talks to a running OpenAI-compatible server (``/v1/chat/completions``) so that both
-the direct option readout and the autoregressive path use the same optimized
-runtime (fused kernels, CUDA graphs, prefix cache). Jev-style readout is
-prefill-only: ``max_tokens=1`` plus ``logprobs`` over the option labels. Repeated
-image/state prefixes are reused by the server's prefix cache (SGLang Radix Cache
-or vLLM automatic prefix caching).
+Talks to a running vLLM OpenAI-compatible server (``/v1/chat/completions``) so
+that both the direct option readout and the autoregressive path use the same
+optimized runtime (fused kernels, CUDA graphs, prefix cache). Jev-style readout
+is prefill-only: ``max_tokens=1`` plus ``logprobs`` over the option labels.
+Repeated image/state prefixes are reused by vLLM's automatic prefix caching
+(``--enable-prefix-caching``).
 
 Based on the approach used by https://github.com/Yinsongxu/LLM2Jev
-(SGLang ``score`` with ``label_token_ids`` + shared-prefix staging).
+(shared-prefix staging for prefill-only label scoring).
 """
 
 from __future__ import annotations
@@ -28,8 +28,14 @@ from .core import LETTERS, direct_messages
 from .prompt import DIRECT_SYSTEM, GENERATION_SYSTEM, build_generation_text, task_standard
 
 
-class SGLangError(RuntimeError):
-    """Raised when the SGLang server errors or returns an unusable response."""
+class VLLMError(RuntimeError):
+    """Raised when the vLLM server errors or returns an unusable response."""
+
+
+class BatchNotSupportedError(VLLMError):
+    """The vLLM server has no native batched chat endpoint; callers may fan out."""
+
+    batch_not_supported = True
 
 
 def _image_url(reference: str) -> str:
@@ -55,20 +61,18 @@ def _map_label_logprobs(top_logprobs: list[dict], labels: list[str]) -> dict[str
     return {label: observed.get(label.strip().upper()) for label in labels}
 
 
-class SGLangBackend:
-    """Direct option readout and generation against one SGLang server."""
+class VLLMBackend:
+    """Direct option readout and generation against one vLLM server."""
 
-    def __init__(self, base_url: str, model: str, api_key: str | None = None, timeout: float = 300.0,
-                 backend_name: str = "sglang"):
+    def __init__(self, base_url: str, model: str, api_key: str | None = None, timeout: float = 300.0):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
-        self.backend_name = backend_name
         self.requests = 0
         self._count_lock = threading.Lock()
 
-    def _post(self, path: str, payload: dict) -> tuple[dict, float]:
+    def _post(self, path: str, payload: dict, unsupported: tuple[int, ...] = ()) -> tuple[dict, float]:
         data = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -80,7 +84,9 @@ class SGLangBackend:
                 body = json.loads(response.read())
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", "replace")[:500]
-            raise SGLangError(f"SGLang HTTP {error.code}: {detail}") from error
+            if error.code in unsupported:
+                raise BatchNotSupportedError(f"vLLM HTTP {error.code} for {path}: {detail}") from error
+            raise VLLMError(f"vLLM HTTP {error.code}: {detail}") from error
         elapsed = time.perf_counter() - started
         with self._count_lock:
             self.requests += 1
@@ -116,7 +122,7 @@ class SGLangBackend:
         try:
             content = body["choices"][0]["logprobs"]["content"][0]
         except (KeyError, IndexError, TypeError) as error:
-            raise SGLangError("SGLang response did not include first-token logprobs") from error
+            raise VLLMError("vLLM response did not include first-token logprobs") from error
         letters = LETTERS[: len(options)]
         mapped = _map_label_logprobs(content.get("top_logprobs", []), list(letters))
         # Include the chosen token itself in case it is absent from top_logprobs.
@@ -125,7 +131,7 @@ class SGLangBackend:
             mapped[chosen] = float(content.get("logprob", float("-inf")))
         available = {label: value for label, value in mapped.items() if value is not None}
         if not available:
-            raise SGLangError("None of the option letters appeared in SGLang top_logprobs")
+            raise VLLMError("None of the option letters appeared in vLLM top_logprobs")
         maximum = max(available.values())
         weights = {label: pow(2.718281828459045, value - maximum) for label, value in available.items()}
         total = sum(weights.values())
@@ -151,32 +157,64 @@ class SGLangBackend:
             "has_image": bool(row.get("image")),
             "image_tokens": 0,
             "input_tokens": scored["prompt_tokens"],
-            "prompt_version": "sglang-prefill-logp",
-            "probability_status": "conditional option score from SGLang top_logprobs",
+            "prompt_version": "vllm-prefill-logp",
+            "probability_status": "conditional option score from vLLM top_logprobs",
         }
 
     def score_batch(self, state, image, criteria, **_ignored):
-        """Score many criteria by firing their requests concurrently.
+        """Score many criteria with one batched upstream request when possible.
 
-        The OpenAI-compatible server (vLLM/SGLang) then continuous-batches them on
-        the GPU, so the criteria share one step instead of running one after
-        another; the shared image/state prefix is reused by its prefix cache.
+        ``/v1/chat/completions/batch`` carries every criterion's prompt in a single
+        HTTP request; the shared image/state prefix is still prefill-cached by the
+        server. Older servers without the batched endpoint fall back to concurrent
+        per-criterion requests, which the server still continuous-batches.
         """
         if not isinstance(criteria, list) or not criteria:
             raise ValueError("criteria must be a nonempty list")
         started = time.perf_counter()
+        conversations = []
+        letters_per_criterion = []
+        for criterion in criteria:
+            messages = direct_messages(
+                {"id": "x", "state": state, "question": criterion["question"],
+                 "options": criterion["options"], "standard": task_standard(criterion)}
+            )
+            conversations.append([
+                {"role": "system", "content": DIRECT_SYSTEM},
+                {"role": "user", "content": self._content(messages[-1]["content"], image)},
+            ])
+            letters_per_criterion.append(list(LETTERS[: len(criterion["options"])]))
+
+        used_batch = False
         workers = min(len(criteria), 32)
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            scored = list(pool.map(
-                lambda criterion: self.score_options(
-                    state, criterion["question"], criterion["options"], image, task_standard(criterion)
-                ),
-                criteria,
-            ))
+        try:
+            readouts = self.score_labels_batch(conversations, letters_per_criterion)
+            used_batch = True
+        except BatchNotSupportedError:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                scored = list(pool.map(
+                    lambda criterion: self.score_options(
+                        state, criterion["question"], criterion["options"], image, task_standard(criterion)
+                    ),
+                    criteria,
+                ))
+        if used_batch:
+            scored = [
+                {
+                    "letters": letters,
+                    "probabilities": readout["probabilities"],
+                    "logprobs": readout["logprobs"],
+                    "prompt_tokens": readout.get("prompt_tokens", 0),
+                    "seconds": readout.get("seconds", 0.0),
+                    "batch_usage": readout.get("batch_usage"),
+                }
+                for readout, letters in zip(readouts, letters_per_criterion)
+            ]
         total_seconds = time.perf_counter() - started
         results = []
         input_tokens = 0
         request_seconds = []
+        batch_usage = None
         for index, (criterion, item) in enumerate(zip(criteria, scored)):
             results.append(
                 {
@@ -187,12 +225,16 @@ class SGLangBackend:
                     "has_image": bool(image),
                     "image_tokens": 0,
                     "input_tokens": item["prompt_tokens"],
-                    "prompt_version": "sglang-prefill-logp",
-                    "probability_status": "conditional option score from SGLang top_logprobs",
+                    "prompt_version": "vllm-prefill-logp",
+                    "probability_status": "conditional option score from vLLM top_logprobs",
                 }
             )
-            input_tokens += item["prompt_tokens"]
-            request_seconds.append(item["seconds"])
+            input_tokens += int(item["prompt_tokens"] or 0)
+            request_seconds.append(float(item["seconds"] or 0.0))
+        if used_batch:
+            batch_usage = next((item.get("batch_usage") for item in scored if item.get("batch_usage")), None)
+            if batch_usage:
+                input_tokens += int(batch_usage.get("prompt_tokens", 0) or 0)
         timing = {
             "total_seconds": total_seconds,
             "prefill_seconds": total_seconds,
@@ -205,18 +247,38 @@ class SGLangBackend:
             "prefill_passes": 1,
             "suffix_passes": 0,
             "forward_passes": len(results),
-            "requests": len(results),
-            "concurrency": workers,
+            "requests": 1 if used_batch else len(results),
+            "concurrency": 1 if used_batch else workers,
             "sum_request_seconds": sum(request_seconds),
             "max_request_seconds": max(request_seconds) if request_seconds else 0.0,
             "batched": True,
+            "mode": "batch" if used_batch else "fanout",
             "image": bool(image),
-            "backend": self.backend_name,
+            "backend": "vllm",
             "input_tokens": input_tokens,
         }
+        if batch_usage is not None:
+            timing["batch_seconds"] = float(batch_usage.get("seconds", 0.0) or 0.0)
         return results, timing
 
     # ---- arbitrary messages + label readout (OpenAI-compatible Jev) ----------
+    @staticmethod
+    def _label_readout(content: dict, labels: list[str]) -> dict:
+        """Normalise one first-token logprob entry into label probabilities."""
+        mapped = _map_label_logprobs(content.get("top_logprobs", []), labels)
+        chosen = str(content.get("token", "")).strip().upper()
+        for label in labels:
+            if label.strip().upper() == chosen and mapped.get(label) is None:
+                mapped[label] = float(content.get("logprob", float("-inf")))
+        available = {label: value for label, value in mapped.items() if value is not None}
+        if not available:
+            raise VLLMError("None of the labels appeared in vLLM top_logprobs")
+        maximum = max(available.values())
+        weights = {label: pow(2.718281828459045, value - maximum) for label, value in available.items()}
+        total = sum(weights.values())
+        probabilities = {label: weights[label] / total for label in labels if label in weights}
+        return {"probabilities": probabilities, "logprobs": mapped, "raw_token": content.get("token")}
+
     def score_labels(self, messages: list[dict], labels: list[str], top_logprobs: int = 20):
         """Prefill-only logprob readout over caller-supplied labels for raw messages."""
         if not isinstance(messages, list) or not messages:
@@ -236,29 +298,75 @@ class SGLangBackend:
         try:
             content = body["choices"][0]["logprobs"]["content"][0]
         except (KeyError, IndexError, TypeError) as error:
-            raise SGLangError("SGLang response did not include first-token logprobs") from error
-        mapped = _map_label_logprobs(content.get("top_logprobs", []), labels)
-        chosen = str(content.get("token", "")).strip().upper()
-        for label in labels:
-            if label.strip().upper() == chosen and mapped.get(label) is None:
-                mapped[label] = float(content.get("logprob", float("-inf")))
-        available = {label: value for label, value in mapped.items() if value is not None}
-        if not available:
-            raise SGLangError("None of the labels appeared in SGLang top_logprobs")
-        maximum = max(available.values())
-        weights = {label: pow(2.718281828459045, value - maximum) for label, value in available.items()}
-        total = sum(weights.values())
-        probabilities = {label: weights[label] / total for label in labels if label in weights}
+            raise VLLMError("vLLM response did not include first-token logprobs") from error
+        readout = self._label_readout(content, labels)
         usage = body.get("usage", {}) or {}
         details = usage.get("prompt_tokens_details") or {}
-        return {
-            "probabilities": probabilities,
-            "logprobs": mapped,
+        readout.update(
+            prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+            cached_tokens=int(details.get("cached_tokens", 0) or 0),
+            seconds=elapsed,
+        )
+        return readout
+
+    def score_labels_batch(self, conversations: list[list[dict]], labels, top_logprobs: int = 20):
+        """Read labels for many conversations in ONE request via vLLM's batch endpoint.
+
+        ``/v1/chat/completions/batch`` (recent vLLM) processes N conversations
+        from a single HTTP request and returns one choice per conversation, so the
+        whole judgment (person + all tasks) is one upstream HTTP round trip.
+
+        ``labels`` is either one label list shared by every conversation or one
+        list per conversation (when criteria declare different option counts).
+        Raises :class:`BatchNotSupportedError` when the endpoint is missing, so
+        callers can fall back to concurrent per-conversation requests.
+        """
+        if not isinstance(conversations, list) or not conversations:
+            raise ValueError("conversations must be a nonempty list")
+        if not isinstance(labels, list) or not labels:
+            raise ValueError("labels must be a nonempty list")
+        per_conversation = (
+            [list(item) for item in labels]
+            if isinstance(labels[0], list)
+            else [list(labels) for _ in conversations]
+        )
+        if len(per_conversation) != len(conversations):
+            raise ValueError("labels must provide one list per conversation")
+        payload = {
+            "model": self.model,
+            "messages": conversations,
+            "max_tokens": 1,
+            "temperature": 0.0,
+            "logprobs": True,
+            "top_logprobs": min(max(top_logprobs, max(len(item) for item in per_conversation) + 2), 20),
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        body, elapsed = self._post("/v1/chat/completions/batch", payload, unsupported=(404, 405))
+        choices = body.get("choices")
+        if not isinstance(choices, list) or len(choices) != len(conversations):
+            raise VLLMError("vLLM batch response did not include one choice per conversation")
+        usage = body.get("usage", {}) or {}
+        details = usage.get("prompt_tokens_details") or {}
+        batch_usage = {
             "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
             "cached_tokens": int(details.get("cached_tokens", 0) or 0),
             "seconds": elapsed,
-            "raw_token": content.get("token"),
         }
+        results = []
+        for index, choice in enumerate(sorted(choices, key=lambda item: item.get("index", 0))):
+            try:
+                content = choice["logprobs"]["content"][0]
+            except (KeyError, IndexError, TypeError) as error:
+                raise VLLMError("vLLM batch response did not include first-token logprobs") from error
+            readout = self._label_readout(content, per_conversation[index])
+            readout.update(
+                prompt_tokens=0,
+                cached_tokens=0,
+                seconds=elapsed / len(conversations),
+                batch_usage=batch_usage,
+            )
+            results.append(readout)
+        return results
 
     # ---- generation --------------------------------------------------------
     def generate(self, state, image, criteria, max_new_tokens=None):
@@ -295,5 +403,5 @@ class SGLangBackend:
             "decode_passes": new_tokens,
             "forward_passes": 1 + new_tokens,
             "has_image": bool(image),
-            "backend": self.backend_name,
+            "backend": "vllm",
         }

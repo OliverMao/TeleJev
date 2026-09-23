@@ -69,32 +69,30 @@ CUDA_VISIBLE_DEVICES=0 python serve.py --model Qwen/Qwen3.5-4B
 python serve.py --fake
 ```
 
-### SGLang / vLLM 后端
+### vLLM 后端
 
-把推理放到运行中的 OpenAI 兼容服务上（SGLang 或 vLLM），Jev 式读 logits 与生成都走该服务，享受融合 kernel / CUDA Graph / 前缀缓存：
+把推理放到运行中的 vLLM OpenAI 兼容服务上，Jev 式读 logits 与生成都走该服务，享受融合 kernel / CUDA Graph / 前缀缓存：
 
 ```bash
-# 1) 起服务（二选一）
-python -m sglang.launch_server --model-path /path/to/model --port 30000
-# 或
-vllm serve /path/to/model --port 30000 --enable-prefix-caching
+# 1) 起服务（多图还需加 --limit-mm-per-prompt image=20）
+vllm serve /path/to/model --port 30000 \
+  --enable-prefix-caching \
+  --served-model-name Qwen/Qwen3.5-4B
 
 # 2) 用该后端提供 TeleJev 接口
-python serve.py --backend sglang \     # 或 --backend vllm
+python serve.py --backend vllm \
   --server-url http://127.0.0.1:30000 \
   --served-model Qwen/Qwen3.5-4B --port 22001
 ```
 
 - **Jev 式读取**：`max_tokens=1` + `logprobs`，只对选项字母归一化（prefill-only，不生成）
 - **生成**：同一服务的普通 `max_tokens` 路径
-- **多判据**：并发发出各判据请求，由服务端**连续批处理**在同一 step 内完成，并用前缀缓存复用图像/state 共享前缀（SGLang Radix Cache 默认开；vLLM 需 `--enable-prefix-caching`）
+- **多判据**：把“是否有人”和全部任务放进 vLLM 的 `/v1/chat/completions/batch`，**一次 HTTP 请求**判完；无该端点的旧版 vLLM 自动退回并发逐个读取
 
-直接用 vLLM：`python serve.py --backend vllm --server-url http://127.0.0.1:30000 --served-model <model>`。
-
-直接对比两者（对 SGLang / vLLM 都适用）：
+直接对比 Jev 与完整自回归：
 
 ```bash
-python benchmarks/sglang_compare.py \
+python benchmarks/vllm_compare.py \
   --base-url http://127.0.0.1:30000 --model Qwen/Qwen3.5-4B --image demo/fall.png
 ```
 
@@ -170,7 +168,7 @@ curl -X POST http://127.0.0.1:8000/decide \
 
 ### OpenAI 兼容的 Jev 接口
 
-`/v1/chat/completions` 对客户端来说就是**普通自回归模型**：发一次 chat 请求（可含图像 + 你自己的提示词），收到一条 assistant 消息。内部怎么打给 SGLang/vLLM 由服务端决定——它会针对每个任务（含“是否有人”）并发发一次 **prefill-only logprob 读取**，由服务端批处理，再拼装结果。**输出永远是**：
+`/v1/chat/completions` 对客户端来说就是**普通自回归模型**：发一次 chat 请求（可含图像 + 你自己的提示词），收到一条 assistant 消息。内部怎么打给 vLLM 由服务端决定——它会把“是否有人”和所有任务放进一次批量请求（`/v1/chat/completions/batch`）做 **prefill-only logprob 读取**，再拼装结果。**输出永远是**：
 
 ```json
 {"has_person": 0 或 1, "violations": ["行为名称", ...]}
@@ -205,7 +203,7 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
     "tasks": ["摔倒", "挥手"],
     "has_person_probabilities": {"A": 0.9, "B": 0.1},
     "violation_probabilities": {"摔倒": {"A": 0.2, "B": 0.8}, "挥手": {"A": 0.7, "B": 0.3}},
-    "requests": 3, "concurrency": 3
+    "requests": 3, "http_requests": 1, "mode": "batch", "concurrency": 1
   }
 }
 ```
@@ -213,8 +211,10 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
 - 任务名来源：优先顶层 `tasks`，否则从 messages 里的 `任务名称：X` 解析，都没有则用内置默认集合。
 - `violations` 里的名称与任务名逐字一致，便于前端按名点亮卡片。
 - `completion_tokens` 为 0（内部不生成 token）；概率放在额外字段 `telejev`，OpenAI 客户端会自动忽略。
-- 需 `--backend sglang|vllm`（复用服务端 tokenizer / 前缀缓存，并让并发请求在服务端成一个 batch）。
-- **前缀缓存（APC）**：请求里 `system + 图像 + 任务清单` 在前、逐任务指令拼在最后，N+1 次请求共享同一段前缀；服务端 APC/Radix Cache 只编码一次图像。内部先用“是否有人”那次请求预热后缀，再并发其余任务。需服务端开启前缀缓存（SGLang 默认开；vLLM 加 `--enable-prefix-caching`），多图还需放开上限（vLLM `--limit-mm-per-prompt image=20`）。**追加式帧历史**（旧帧不变、新帧往尾部加）前缀稳定，命中最佳；用 `usage.prompt_tokens_details.cached_tokens` 或 `telejev.cached_tokens` 可直接验证命中量。
+- 需 `--backend vllm`（复用服务端 tokenizer / 前缀缓存）。
+- **一次 HTTP 请求判完全部任务**：优先走 vLLM 的 `/v1/chat/completions/batch`（较新 vLLM 自带）：一次请求同时带上“是否有人”和全部任务；服务端没有该端点时自动退回并发逐个读取，结果不变。响应里的 `telejev.requests` 是模型读取次数（1 + 任务数），`telejev.http_requests` 是真实上游 HTTP 请求数（批量模式下为 1），`telejev.mode` 为 `batch` / `fanout`。
+- **防止图像重复上传**：图像以 data URI / 本地路径传入时，会先存入本服务的 `/frames/<id>`，上游凭 URL 只抓取一次（vLLM 会按 URL 缓存），不再逐任务重复上传 base64。vLLM 与本服务不同机时用 `--public-url http://<本服务可达地址>:<port>` 告知回拉地址。
+- **前缀缓存（APC）**：请求里 `system + 图像 + 任务清单` 在前、逐任务指令拼在最后，同一批量请求里的“是否有人”与全部任务共享同一段前缀；开启 vLLM `--enable-prefix-caching`（多图还需 `--limit-mm-per-prompt image=20`）后，后续请求可命中已缓存前缀（**追加式帧历史**：旧帧不变、新帧往尾部加，前缀最稳定）。用 `usage.prompt_tokens_details.cached_tokens` 或 `telejev.cached_tokens` 可直接验证命中量。
 
 ### 批量判定（多任务）
 
@@ -265,6 +265,8 @@ curl -X POST http://127.0.0.1:8000/decide-batch \
 
 `timing.total_seconds` 是**从服务端拿到请求数据到推理完成**的时间（不含客户端与服务器之间的网络传输）；细分：`image_seconds`（图像解码）、`encode_seconds`（prompt 编码）、`prefill_seconds`（图像+state 前向）、`suffix_seconds`（判据前向）。每个任务不再单独计时（shared 模式下它们共享同一次判据前向）。
 
+`--backend vllm` 时，`/decide-batch` 会把全部 criteria 放进**一次** `/v1/chat/completions/batch` 请求（图像同样转存 `/frames/<id>`、只抓一次）；服务端无该端点时自动退回并发逐个读取。`timing.mode` 为 `batch` / `fanout`，`timing.requests` 为真实上游请求数。
+
 ### 前端测试页
 
 `demo/index.html` 是单文件多任务测试页：勾选 打架 / 摔倒 / 挥手 / 捂胸口（“是否有人”始终判定），对同一张画面一次调用 `/decide-batch`，并把结果归一为统一格式：
@@ -277,7 +279,7 @@ curl -X POST http://127.0.0.1:8000/decide-batch \
 
 `demo/replay.html` 是速度对比回放页：并行发起 direct 与 generate，direct 结果立即出现；generate 返回后，按它**真实生成耗时**用打字机把生成内容逐字回放（可选 1×/2×/4×/8× 回放速度，耗时数字始终是真实值），直观展示 direct 相对完整自回归的加速倍数。
 
-`demo/completions.html` 是 `/v1/chat/completions` 测试页：自己填 system/user 提示词（预fil 了一套监控任务清单）、可选上传或内嵌示例图像，调用后展示 `{"has_person", "violations"}`、各任务 A/B 概率、请求数/并发/耗时与原始响应。需以 `--backend sglang|vllm` 启动。
+`demo/completions.html` 是 `/v1/chat/completions` 测试页：自己填 system/user 提示词（预fil 了一套监控任务清单）、可选上传或内嵌示例图像，调用后展示 `{"has_person", "violations"}`、各任务 A/B 概率、请求数/并发/耗时与原始响应。需以 `--backend vllm` 启动。
 
 ```bash
 python serve.py --fake          # 启动服务
@@ -342,7 +344,7 @@ src/telejev/          # 库（可 pip install；import telejev）
   shared.py           # 共享前缀批量（本地）
   batch.py            # /decide-batch 的本地实现
   autoregressive.py   # 自回归基线（本地 model.generate）
-  sglang_backend.py   # SGLang / vLLM OpenAI 兼容后端
+  vllm_backend.py     # vLLM OpenAI 兼容后端
   openai_compat.py    # /v1/chat/completions 封装（Jev 式结构化输出）
   api.py              # HTTP 服务（/help /health /decide /decide-batch /generate ...）
   cli.py              # 命令行 JSONL 打分
@@ -350,7 +352,7 @@ run.py                # 入口：JSONL 打分
 serve.py              # 入口：HTTP 服务
 start.sh              # 本地启动示例
 demo/                 # 前端页面与示例图（index.html / replay.html / fall.png）
-benchmarks/           # 对比脚本（compare_generation.py / sglang_compare.py）
+benchmarks/           # 对比脚本（compare_generation.py / vllm_compare.py）
 examples/             # 调用示例（api_client.py）
 tests/                # 接口离线测试（test_api.py）
 ```

@@ -6,6 +6,7 @@ Uses the built-in stub scorer, so no GPU, model weights, or network are needed::
     python tests/test_api.py
 """
 
+import base64
 import json
 import sys
 import threading
@@ -15,7 +16,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from telejev.api import DecisionService, fake_batch_scorer, fake_generate, fake_score_labels, fake_scorer, serve  # noqa: E402
+from telejev.api import (  # noqa: E402
+    DecisionService,
+    FrameStore,
+    fake_batch_scorer,
+    fake_generate,
+    fake_score_labels,
+    fake_score_labels_batch,
+    fake_scorer,
+    serve,
+)
 
 # 1x1 transparent PNG, used to exercise the optional image field.
 TINY_PNG = (
@@ -81,13 +91,93 @@ def post(base: str, path: str, body: dict) -> dict:
         return json.loads(response.read())
 
 
+def check_backend_batch() -> None:
+    """One upstream POST for N conversations, and a clear 404 fallback signal."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from telejev.vllm_backend import BatchNotSupportedError, VLLMBackend
+
+    class Upstream(BaseHTTPRequestHandler):
+        batch_ok = True
+
+        def log_message(self, *args) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            if self.path == "/v1/chat/completions/batch" and not type(self).batch_ok:
+                payload, status = b'{"error": {"message": "Not Found"}}', 404
+            else:
+                count = 2 if self.path == "/v1/chat/completions/batch" else 1
+                payload = json.dumps({
+                    "choices": [
+                        {"index": index, "logprobs": {"content": [{
+                            "token": "A", "logprob": -0.1,
+                            "top_logprobs": [{"token": "A", "logprob": -0.1}, {"token": "B", "logprob": -2.3}],
+                        }]}}
+                        for index in range(count)
+                    ],
+                    "usage": {"prompt_tokens": 100},
+                }).encode()
+                status = 200
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    try:
+        backend = VLLMBackend(f"http://127.0.0.1:{upstream.server_address[1]}", "telejev-fake")
+        readouts = backend.score_labels_batch(
+            [[{"role": "user", "content": "a"}], [{"role": "user", "content": "b"}]], ["A", "B"]
+        )
+        assert backend.requests == 1, backend.requests
+        assert len(readouts) == 2 and readouts[0]["probabilities"]["A"] > 0.9, readouts
+        assert readouts[0]["batch_usage"]["prompt_tokens"] == 100
+
+        Upstream.batch_ok = False
+        try:
+            backend.score_labels_batch([[{"role": "user", "content": "a"}]], ["A", "B"])
+            raise AssertionError("expected BatchNotSupportedError")
+        except BatchNotSupportedError:
+            pass
+
+        # /decide-batch style criteria use the same batched endpoint, with a
+        # per-criterion fan-out when the server lacks it.
+        criteria = [
+            {"id": f"c{index}", "question": "q", "options": [
+                {"id": "yes", "description": "y"}, {"id": "no", "description": "n"},
+            ]}
+            for index in range(2)
+        ]
+        results, timing = backend.score_batch("画面", None, criteria)
+        assert timing["mode"] == "fanout" and timing["requests"] == 2, timing
+        assert len(results) == 2 and results[0]["probabilities"][0] > 0.9, results
+        Upstream.batch_ok = True
+        results, timing = backend.score_batch("画面", None, criteria)
+        assert timing["mode"] == "batch" and timing["requests"] == 1, timing
+        assert len(results) == 2 and results[0]["probabilities"][0] > 0.9, results
+    finally:
+        upstream.shutdown()
+
+
 def main() -> None:
+    seen_conversations: list = []
+
+    def recording_batch(conversations, labels):
+        seen_conversations.append(conversations)
+        return fake_score_labels_batch()(conversations, labels)
+
     service = DecisionService(
-        fake_scorer(), "telejev-fake", fake_batch_scorer(), fake_generate(), fake_score_labels()
+        fake_scorer(), "telejev-fake", fake_batch_scorer(), fake_generate(), fake_score_labels(),
+        recording_batch, FrameStore(),
     )
     httpd = serve(service, "127.0.0.1", 0)
     port = httpd.server_address[1]
     base = f"http://127.0.0.1:{port}"
+    service._frame_base = base  # frames are fetched from this same test server
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
         # 1. Single text-only decision returns the frozen decision object.
@@ -135,7 +225,55 @@ def main() -> None:
         assert all(name in {"摔倒", "挥手"} for name in content["violations"])
         assert completion["telejev"]["tasks"] == ["摔倒", "挥手"]
         assert completion["telejev"]["requests"] == 3  # person + 2 tasks
+        assert completion["telejev"]["http_requests"] == 1  # one batched request for everything
+        assert completion["telejev"]["mode"] == "batch"
         assert completion["usage"]["completion_tokens"] == 0
+
+        # 5d. Data-URI images are spilled to /frames/<id>, served back once.
+        spill = post(base, "/v1/chat/completions", {
+            "model": "telejev",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": TINY_PNG}},
+                    {"type": "text", "text": "任务名称：摔倒"},
+                ]},
+            ],
+        })
+        assert spill["telejev"]["mode"] == "batch"
+        parts = seen_conversations[-1][0][-1]["content"]
+        frame_url = parts[0]["image_url"]["url"]
+        assert frame_url.startswith(base + "/frames/"), frame_url
+        with urllib.request.urlopen(frame_url) as response:
+            assert response.read() == base64.b64decode(TINY_PNG.split(",", 1)[1])
+
+        # 5e. Servers without the batched endpoint fall back to concurrent reads.
+        service._score_labels_batch = None
+        fallback = post(base, "/v1/chat/completions", {
+            "model": "telejev",
+            "messages": [
+                {"role": "user", "content": "任务名称：摔倒\n任务名称：挥手"},
+            ],
+        })
+        assert fallback["telejev"]["mode"] == "fanout"
+        assert fallback["telejev"]["http_requests"] == 3
+
+        # 5f. A 404 on the batched endpoint disables batch and falls back once.
+        class _BatchUnsupported(Exception):
+            batch_not_supported = True
+
+        def unsupported_batch(conversations, labels):
+            raise _BatchUnsupported("missing endpoint")
+
+        failing_service = DecisionService(
+            fake_scorer(), "telejev-fake", fake_batch_scorer(), fake_generate(), fake_score_labels(),
+            unsupported_batch,
+        )
+        fallback_direct = failing_service.openai_chat({
+            "messages": [{"role": "user", "content": "任务名称：摔倒"}],
+        })
+        assert fallback_direct["telejev"]["mode"] == "fanout"
+        assert fallback_direct["telejev"]["http_requests"] == 2
+        assert failing_service._score_labels_batch is None
 
         # 5b. OpenAI-compatible model list.
         with urllib.request.urlopen(base + "/v1/models") as response:
@@ -162,6 +300,8 @@ def main() -> None:
             assert error.code == 404, error.code
 
         print("all interface checks passed\n")
+        check_backend_batch()
+        print("backend batch checks passed\n")
         print(json.dumps(batch, ensure_ascii=False, indent=2))
     finally:
         httpd.shutdown()

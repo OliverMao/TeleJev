@@ -4,7 +4,7 @@
 - The library lives in `src/telejev/` (import `telejev`). Entries: `python run.py` (JSONL
   scorer) and `python serve.py` (HTTP server).
 - Two inference backends: local PyTorch/CUDA (`--backend local`) and an OpenAI-compatible
-  SGLang/vLLM server (`--backend sglang|vllm --server-url ...`). Expose exactly one CUDA GPU
+  vLLM server (`--backend vllm --server-url ...`). Expose exactly one CUDA GPU
   per local scorer process.
 - Non-package material: `demo/` (front-end pages), `benchmarks/` (comparison scripts),
   `examples/` (client examples), `tests/` (offline interface test).

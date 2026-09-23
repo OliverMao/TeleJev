@@ -19,23 +19,126 @@ POST /decide        one decision row -> fixed decision object
 POST /decide-batch  one state/image + many criteria, sharing one image prefill
 POST /generate      same criteria via full greedy autoregressive generation
 POST /v1/chat/completions  OpenAI-compatible Jev readout over client labels
+GET  /frames/<id>   images spilled from data URIs / paths for one-shot upstream fetch
 
 ``image`` is optional and may be a base64 ``data:`` URI, an ``http(s)`` URL, or a
 local file path. It is only used when the loaded model exposes a multimodal
-processor.
+processor. With the vLLM backend, data-URI/local images are stored under
+``/frames/<id>`` (see ``--public-url``) so the upstream server fetches each frame
+once instead of receiving it in every per-task request.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
+import mimetypes
+import re
 import threading
 import time
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from .core import LETTERS, validate_row
 from .prompt import task_standard
 
 ROW_KEYS = ("id", "state", "question", "options", "image")
+
+_DATA_URI = re.compile(r"^data:(?P<type>[^;,]+)?(?:;charset=[^;,]+)?;base64,(?P<data>.*)$", re.DOTALL)
+
+
+class FrameStore:
+    """Bounded in-memory store for images served back at ``/frames/<id>``.
+
+    With the vLLM backend every per-task request would otherwise carry the full
+    image again. Spilling the bytes to this store and pointing the upstream
+    requests at a frame URL lets vLLM fetch each image once (it caches media by
+    URL) and reuse it across all tasks instead of re-uploading base64 per task.
+    """
+
+    def __init__(self, limit: int = 64):
+        self._limit = max(1, int(limit))
+        self._lock = threading.Lock()
+        self._items: "OrderedDict[str, tuple[str, bytes]]" = OrderedDict()
+
+    def put(self, payload: bytes, content_type: str = "image/png") -> str:
+        digest = hashlib.sha256(payload).hexdigest()[:32]
+        with self._lock:
+            self._items[digest] = (content_type, payload)
+            self._items.move_to_end(digest)
+            while len(self._items) > self._limit:
+                self._items.popitem(last=False)
+        return digest
+
+    def get(self, frame_id: str) -> tuple[str, bytes] | None:
+        with self._lock:
+            item = self._items.get(frame_id)
+            if item is not None:
+                self._items.move_to_end(frame_id)
+            return item
+
+
+def image_bytes(reference) -> tuple[str, bytes] | None:
+    """Decode a data URI or local path into (content_type, bytes); http(s) stays as is."""
+    if not isinstance(reference, str) or not reference:
+        return None
+    if reference.startswith(("http://", "https://")):
+        return None
+    match = _DATA_URI.match(reference)
+    if match:
+        try:
+            payload = base64.b64decode(match.group("data"), validate=False)
+        except (binascii.Error, ValueError):
+            return None
+        return match.group("type") or "image/png", payload
+    path = Path(reference)
+    if path.is_file():
+        return mimetypes.guess_type(path.name)[0] or "image/png", path.read_bytes()
+    return None
+
+
+def _server_is_local(url: str) -> bool:
+    """True when the vLLM server runs on this host and can fetch our frame URLs."""
+    from urllib.parse import urlparse
+
+    host = (urlparse(url).hostname or "").lower()
+    return host in ("127.0.0.1", "localhost", "::1", "0.0.0.0")
+
+
+def spill_message_images(messages: list, store: FrameStore, base: str) -> list:
+    """Copy messages, replacing data-URI/local image parts with stored frame URLs."""
+    out = []
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            out.append(message)
+            continue
+        parts = []
+        changed = False
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                image_url = part.get("image_url") or {}
+                decoded = image_bytes(image_url.get("url"))
+                if decoded is not None:
+                    content_type, payload = decoded
+                    frame = store.put(payload, content_type)
+                    part = {**part, "image_url": {**image_url, "url": f"{base}/frames/{frame}"}}
+                    changed = True
+            parts.append(part)
+        out.append({**message, "content": parts} if changed else message)
+    return out
+
+
+def spill_image(image, store: FrameStore, base: str):
+    """Return a frame URL for a top-level image field (data URI or local path)."""
+    decoded = image_bytes(image)
+    if decoded is None:
+        return image
+    content_type, payload = decoded
+    return f"{base}/frames/{store.put(payload, content_type)}"
 
 
 def canonical_decision(raw: dict) -> dict:
@@ -68,11 +171,15 @@ def canonical_decision(raw: dict) -> dict:
 class DecisionService:
     """Thread-safe wrapper around single-row and batch scorers."""
 
-    def __init__(self, score_fn, model_name: str, batch_fn=None, generate_fn=None, score_labels_fn=None):
+    def __init__(self, score_fn, model_name: str, batch_fn=None, generate_fn=None, score_labels_fn=None,
+                 score_labels_batch_fn=None, frame_store=None, frame_base: str | None = None):
         self._score = score_fn
         self._batch = batch_fn
         self._generate = generate_fn
         self._score_labels = score_labels_fn
+        self._score_labels_batch = score_labels_batch_fn
+        self.frame_store = frame_store
+        self._frame_base = frame_base
         self.model_name = model_name
         self._lock = threading.Lock()
 
@@ -92,6 +199,8 @@ class DecisionService:
         started = time.perf_counter()
         state = body.get("state")
         image = body.get("image")
+        if self.frame_store is not None and self._frame_base and image:
+            image = spill_image(image, self.frame_store, self._frame_base)
         criteria = body.get("criteria")
         with self._lock:
             results, timing = self._batch(state, image, criteria)
@@ -114,7 +223,7 @@ class DecisionService:
     def openai_chat(self, body: dict) -> dict:
         """OpenAI-compatible Jev: one normal chat request -> {has_person, violations}."""
         if self._score_labels is None:
-            raise ValueError("The OpenAI-compatible Jev endpoint requires --backend sglang or vllm")
+            raise ValueError("The OpenAI-compatible Jev endpoint requires --backend vllm")
         from concurrent.futures import ThreadPoolExecutor
 
         from .openai_compat import (
@@ -124,31 +233,61 @@ class DecisionService:
         messages = body.get("messages")
         if not isinstance(messages, list) or not messages:
             raise ValueError("messages must be a nonempty list")
+        if self.frame_store is not None and self._frame_base:
+            messages = spill_message_images(messages, self.frame_store, self._frame_base)
         tasks = extract_tasks(body)
 
-        def judge(instruction: str) -> dict:
-            return self._score_labels(with_instruction(messages, instruction), ["A", "B"])
+        def judge(conversation: list) -> dict:
+            return self._score_labels(conversation, ["A", "B"])
 
         def hit(result: dict) -> bool:
             probabilities = result.get("probabilities", {})
             return probabilities.get("A", 0.0) >= probabilities.get("B", 0.0)
 
         started = time.perf_counter()
-        # Warm the shared prefix (system + images + user text) once, then fan the
-        # task reads out concurrently so the server batches them (and reuses the
-        # prefix cache instead of re-encoding every image per task).
-        outcomes = [judge(PERSON_INSTRUCTION)]
+        # Put the person read and every task read in ONE batched upstream request,
+        # so the whole judgment is a single HTTP round trip. Servers without the
+        # batched endpoint fall back to concurrent per-conversation reads.
         task_instructions = [task_instruction(name) for name in tasks]
-        workers = min(len(task_instructions), 32) if task_instructions else 1
-        if task_instructions:
+        conversations = [
+            with_instruction(messages, instruction)
+            for instruction in [PERSON_INSTRUCTION, *task_instructions]
+        ]
+        mode = "fanout"
+        http_requests = 0
+        outcomes = []
+        if self._score_labels_batch is not None:
+            try:
+                outcomes = list(self._score_labels_batch(conversations, ["A", "B"]))
+                http_requests = 1
+                mode = "batch"
+            except Exception as error:
+                if not getattr(error, "batch_not_supported", False):
+                    raise
+                self._score_labels_batch = None  # probe once, then stick to fan-out
+        if mode != "batch":
+            workers = min(len(conversations), 32)
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                outcomes += list(pool.map(judge, task_instructions))
+                outcomes = list(pool.map(judge, conversations))
+            http_requests = len(conversations)
+        else:
+            workers = 1
         total_seconds = time.perf_counter() - started
 
         output = {
             "has_person": 1 if hit(outcomes[0]) else 0,
             "violations": [name for name, result in zip(tasks, outcomes[1:]) if hit(result)],
         }
+        prompt_tokens = sum(int(result.get("prompt_tokens", 0) or 0) for result in outcomes)
+        cached_tokens = sum(int(result.get("cached_tokens", 0) or 0) for result in outcomes)
+        batch_usage = None
+        if mode == "batch":
+            batch_usage = next(
+                (result.get("batch_usage") for result in outcomes if result.get("batch_usage")), None
+            )
+            if batch_usage:
+                prompt_tokens += int(batch_usage.get("prompt_tokens", 0) or 0)
+                cached_tokens += int(batch_usage.get("cached_tokens", 0) or 0)
         detail = {
             "tasks": tasks,
             "has_person_probabilities": outcomes[0].get("probabilities", {}),
@@ -156,10 +295,11 @@ class DecisionService:
                 name: outcomes[index + 1].get("probabilities", {}) for index, name in enumerate(tasks)
             },
             "requests": len(outcomes),
+            "http_requests": http_requests,
+            "mode": mode,
             "concurrency": workers,
-            "prefix_warmup": True,
-            "prompt_tokens": sum(int(result.get("prompt_tokens", 0) or 0) for result in outcomes),
-            "cached_tokens": sum(int(result.get("cached_tokens", 0) or 0) for result in outcomes),
+            "prompt_tokens": prompt_tokens,
+            "cached_tokens": cached_tokens,
             "requests_detail": [
                 {
                     "prompt_tokens": int(result.get("prompt_tokens", 0) or 0),
@@ -171,6 +311,8 @@ class DecisionService:
             "total_seconds": total_seconds,
             "sum_request_seconds": sum(float(result.get("seconds", 0.0) or 0.0) for result in outcomes),
         }
+        if batch_usage is not None:
+            detail["batch_seconds"] = float(batch_usage.get("seconds", 0.0) or 0.0)
         return build_completion(self.model_name, output, detail)
 
 
@@ -339,6 +481,41 @@ def fake_score_labels():
     return score_labels_fn
 
 
+def fake_score_labels_batch():
+    """Deterministic stub for the one-request batched label readout."""
+
+    def score_labels_batch_fn(conversations: list, labels: list) -> list[dict]:
+        import hashlib
+        import math
+
+        if not isinstance(conversations, list) or not conversations:
+            raise ValueError("conversations must be a nonempty list")
+        if not isinstance(labels, list) or not labels:
+            raise ValueError("labels must be a nonempty list")
+        results = []
+        for messages in conversations:
+            seed = int(hashlib.sha256(json.dumps(messages, ensure_ascii=False).encode()).hexdigest(), 16)
+            weights = {label: math.exp(((seed + index) % 7) / 5.0) for index, label in enumerate(labels)}
+            total = sum(weights.values())
+            probabilities = {label: weight / total for label, weight in weights.items()}
+            results.append({
+                "probabilities": probabilities,
+                "logprobs": {label: math.log(value) for label, value in probabilities.items()},
+                "prompt_tokens": 0,
+                "cached_tokens": 0,
+                "seconds": 0.001,
+                "raw_token": labels[0],
+                "batch_usage": {
+                    "prompt_tokens": 42 * len(conversations),
+                    "cached_tokens": 32,
+                    "seconds": 0.002,
+                },
+            })
+        return results
+
+    return score_labels_batch_fn
+
+
 def help_document(model_name: str) -> dict:
     """Machine-readable usage guide served by GET /help."""
     return {
@@ -353,6 +530,7 @@ def help_document(model_name: str) -> dict:
             {"method": "POST", "path": "/decide-batch", "description": "一份 state/image + 多个 criteria，图像只 prefill 一次。"},
             {"method": "POST", "path": "/generate", "description": "同一组 criteria 走完整自回归，直接生成 {has_person, violations}。"},
             {"method": "POST", "path": "/v1/chat/completions", "description": "OpenAI 兼容：像普通模型一样发一次请求，返回 {has_person, violations}。"},
+            {"method": "GET", "path": "/frames/<id>", "description": "（vLLM 后端）图像暂存；上游凭 URL 只抓取一次，避免逐任务重复上传图像。"},
         ],
         "decide_batch": {
             "request": {
@@ -414,7 +592,7 @@ def help_document(model_name: str) -> dict:
                 ],
                 "tasks": ["摔倒", "挥手"],
             },
-            "internal": "对每个任务（含“是否有人”）并发发一次 prefill-only logprob 读取给 SGLang/vLLM，由服务端批处理，再拼装结果；用户无需关心。",
+            "internal": "把“是否有人”和所有任务放进一次 vLLM /v1/chat/completions/batch 请求做 prefill-only logprob 读取；服务端无该端点时自动退回并发逐个读取。",
             "response": {
                 "object": "chat.completion",
                 "choices": [{"message": {"role": "assistant", "content": "{\"has_person\": 1, \"violations\": [\"挥手\"]}"}, "finish_reason": "stop"}],
@@ -424,12 +602,14 @@ def help_document(model_name: str) -> dict:
                     "has_person_probabilities": {"A": 0.9, "B": 0.1},
                     "violation_probabilities": {"摔倒": {"A": 0.2, "B": 0.8}, "挥手": {"A": 0.7, "B": 0.3}},
                     "requests": 3,
-                    "concurrency": 3,
+                    "http_requests": 1,
+                    "mode": "batch",
+                    "concurrency": 1,
                     "cached_tokens": 300,
                 },
             },
             "task_source": "任务名优先取顶层 tasks，其次从 messages 里的“任务名称：X”解析，都没有则用内置默认集合。",
-            "prefix_cache": "system + 图像 + 任务清单在前，逐任务指令拼在最后；服务端 APC/Radix Cache 只编码一次共享前缀。SGLang 默认开，vLLM 需 --enable-prefix-caching（多图还需 --limit-mm-per-prompt image=20）；内部先用“是否有人”预热后缀，再并发其余任务。追加式帧历史（旧帧不变、新帧后）前缀稳定，命中最佳。响应 usage.prompt_tokens_details.cached_tokens / telejev.cached_tokens 可用于验证是否命中。",
+            "prefix_cache": "system + 图像 + 任务清单在前，逐任务指令拼在最后，同一请求里的“是否有人”与全部任务共享同一段前缀；开启 vLLM --enable-prefix-caching（多图还需 --limit-mm-per-prompt image=20）后，后续请求（如追加式帧历史：旧帧不变、新帧后）可命中 APC。图像以 data URI/本地路径传入时转存为 /frames/<id>，vLLM 只抓取一次，不逐任务重传。响应 usage.prompt_tokens_details.cached_tokens / telejev.cached_tokens 可用于验证是否命中。",
         },
         "notes": [
             "除 /v1/chat/completions 外，其余 POST 端点需要 body 中包含 state 与 criteria（或单条决策行）。",
@@ -463,16 +643,35 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
 
+    def _send_bytes(self, content_type: str, payload: bytes) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(payload)
+
     def do_GET(self) -> None:
-        if self.path == "/health":
+        path = self.path.split("?", 1)[0]
+        if path == "/health":
             self._send(200, {"status": "ok", "model": self.service.model_name})
-        elif self.path == "/help":
+        elif path == "/help":
             self._send(200, help_document(self.service.model_name))
-        elif self.path == "/v1/models":
+        elif path == "/v1/models":
             self._send(200, {
                 "object": "list",
                 "data": [{"id": self.service.model_name, "object": "model", "owned_by": "telejev"}],
             })
+        elif path.startswith("/frames/"):
+            item = None
+            if self.service.frame_store is not None:
+                item = self.service.frame_store.get(path[len("/frames/"):])
+            if item is None:
+                self._send(404, {"error": {"message": "unknown frame", "type": "invalid_request_error"}})
+            else:
+                content_type, payload = item
+                self._send_bytes(content_type, payload)
         else:
             self._send(404, {"error": {"message": f"unknown path {self.path}", "type": "invalid_request_error"}})
 
@@ -506,32 +705,40 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", default="Qwen/Qwen3.5-4B", help="Model source or local path")
-    parser.add_argument("--backend", choices=("local", "sglang", "vllm"), default="local",
-                        help="local = load the model in-process; sglang/vllm = use a running OpenAI-compatible server")
+    parser.add_argument("--backend", choices=("local", "vllm"), default="local",
+                        help="local = load the model in-process; vllm = use a running OpenAI-compatible server")
     parser.add_argument("--server-url", dest="server_url", default=None,
                         help="OpenAI-compatible server base URL (default: http://127.0.0.1:30000)")
-    parser.add_argument("--sglang-url", dest="server_url", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--served-model", dest="served_model", default=None,
                         help="Model name served by the server (default: --model)")
-    parser.add_argument("--sglang-model", dest="served_model", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--public-url", dest="public_url", default=None,
+                        help="URL at which the vLLM backend can reach this server; enables frame-URL image spilling")
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--fake", action="store_true", help="Serve a stub scorer; no GPU or model required")
     args = parser.parse_args()
 
     if args.fake:
         service = DecisionService(
-            fake_scorer(), "telejev-fake", fake_batch_scorer(), fake_generate(), fake_score_labels()
+            fake_scorer(), "telejev-fake", fake_batch_scorer(), fake_generate(), fake_score_labels(),
+            fake_score_labels_batch(),
         )
-    elif args.backend in ("sglang", "vllm"):
-        from .sglang_backend import SGLangBackend
+    elif args.backend == "vllm":
+        from .vllm_backend import VLLMBackend
 
         url = args.server_url or "http://127.0.0.1:30000"
-        backend = SGLangBackend(url, args.served_model or args.model, backend_name=args.backend)
-        print(f"{args.backend} backend: {url} model={backend.model}", flush=True)
+        backend = VLLMBackend(url, args.served_model or args.model)
+        print(f"vLLM backend: {url} model={backend.model}", flush=True)
+        frame_store = FrameStore()
+        frame_base = args.public_url.rstrip("/") if args.public_url else None
+        if frame_base is None and _server_is_local(url):
+            frame_base = f"http://127.0.0.1:{args.port}"
+        if frame_base:
+            print(f"Frame URLs: {frame_base}/frames/<id> (vLLM fetches each image once)", flush=True)
         service = DecisionService(
-            backend.score_row, backend.model, backend.score_batch, backend.generate, backend.score_labels
+            backend.score_row, backend.model, backend.score_batch, backend.generate, backend.score_labels,
+            backend.score_labels_batch, frame_store, frame_base,
         )
     else:
         score_fn, batch_fn, generate_fn, metadata = load_model_scorers(args.model, args.max_tokens)
