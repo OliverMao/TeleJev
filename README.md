@@ -82,12 +82,13 @@ vllm serve /path/to/model --port 30000 \
 # 2) 用该后端提供 TeleJev 接口
 python serve.py --backend vllm \
   --server-url http://127.0.0.1:30000 \
-  --served-model Qwen/Qwen3.5-4B --port 22001
+  --served-model Qwen/Qwen3.5-4B --alias telejev --port 22001
 ```
 
 - **Jev 式读取**：`max_tokens=1` + `logprobs`，只对选项字母归一化（prefill-only，不生成）
 - **生成**：同一服务的普通 `max_tokens` 路径
 - **多判据**：把“是否有人”和全部任务放进 vLLM 的 `/v1/chat/completions/batch`，**一次 HTTP 请求**判完；无该端点的旧版 vLLM 自动退回并发逐个读取
+- **模型名别名**：`--alias <name>` 后，`/v1/models`、`/health`、`/help` 以及 completions 响应里的 `model` 一律返回该别名；发给 vLLM 的 `model` 仍是 `--served-model`（默认 `--model`）
 - **日志**：默认 INFO 每 `--log-interval` 秒（默认 5）汇总一行：端点、请求数、avg/max 耗时、`mode`、`http_requests`、`tasks`、缓存命中（有流量才打，单次请求也会在间隔后打出）；`--log-interval 0` 每个请求一行；`--log-level debug` 额外输出每次 HTTP 访问、上游每次 POST、批量对话数与图像转存；`--log-level warning` 只剩错误
 
 直接对比 Jev 与完整自回归：

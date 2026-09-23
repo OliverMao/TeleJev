@@ -713,7 +713,7 @@ def help_document(model_name: str) -> dict:
             "除 /v1/chat/completions 外，其余 POST 端点需要 body 中包含 state 与 criteria（或单条决策行）。",
             "image 支持 data URI、http(s) URL、本地路径；仅当模型暴露多模态 processor 时会真正送入。",
             "Jev 式（/decide, /decide-batch, /v1/chat/completions）不生成 token；/generate 为完整自回归基线。",
-            "日志：默认 INFO 每 --log-interval 秒（默认 5）汇总一行（有流量才打，单次请求也会在间隔后打出）：端点、请求数、avg/max 耗时、mode、http_requests、tasks、缓存命中；--log-interval 0 每个请求一行；--log-level debug 额外输出每次 HTTP 访问、上游 POST、批量对话数与图像转存。",
+            "日志：默认 INFO 每 --log-interval 秒（默认 5）汇总一行（有流量才打，单次请求也会在间隔后打出）：端点、请求数、avg/max 耗时、mode、http_requests、tasks、缓存命中；--log-interval 0 每个请求一行；--log-level debug 额外输出每次 HTTP 访问、上游 POST、批量对话数与图像转存。启动参数 --alias 可统一 /v1/models、/health、/help 与响应里的 model 名。",
             "所有响应为 UTF-8 JSON；输出格式固定，无需 JSON 修复。",
             "当前后端：" + model_name,
         ],
@@ -821,6 +821,8 @@ def main() -> None:
                         help="OpenAI-compatible server base URL (default: http://127.0.0.1:30000)")
     parser.add_argument("--served-model", dest="served_model", default=None,
                         help="Model name served by the server (default: --model)")
+    parser.add_argument("--alias", default=None,
+                        help="Public model name returned by /v1/models, /health, /help and response.model")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--public-url", dest="public_url", default=None,
@@ -840,7 +842,7 @@ def main() -> None:
 
     if args.fake:
         service = DecisionService(
-            fake_scorer(), "telejev-fake", fake_batch_scorer(), fake_generate(), fake_score_labels(),
+            fake_scorer(), args.alias or "telejev-fake", fake_batch_scorer(), fake_generate(), fake_score_labels(),
             fake_score_labels_batch(), log_interval=args.log_interval,
         )
     elif args.backend == "vllm":
@@ -856,13 +858,15 @@ def main() -> None:
         else:
             logger.info("Image spilling off; pass --public-url if the vLLM server can fetch this one")
         service = DecisionService(
-            backend.score_row, backend.model, backend.score_batch, backend.generate, backend.score_labels,
-            backend.score_labels_batch, frame_store, frame_base, log_interval=args.log_interval,
+            backend.score_row, args.alias or backend.model, backend.score_batch, backend.generate,
+            backend.score_labels, backend.score_labels_batch, frame_store, frame_base,
+            log_interval=args.log_interval,
         )
     else:
         score_fn, batch_fn, generate_fn, metadata = load_model_scorers(args.model, args.max_tokens)
         logger.info("Loaded model: multimodal=%s", metadata["multimodal"])
-        service = DecisionService(score_fn, args.model, batch_fn, generate_fn, log_interval=args.log_interval)
+        service = DecisionService(score_fn, args.alias or args.model, batch_fn, generate_fn,
+                                  log_interval=args.log_interval)
 
     httpd = serve(service, args.host, args.port)
     logger.info("Serving '%s' on http://%s:%s (log level %s, interval %.1fs)",
