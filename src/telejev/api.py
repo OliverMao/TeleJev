@@ -182,45 +182,65 @@ class DecisionService:
         self._frame_base = frame_base
         self._log_interval = max(0.0, float(log_interval or 0.0))
         self._log_lock = threading.Lock()
-        self._log_since = time.perf_counter()
-        self._log_stats = {"count": 0, "total": 0.0, "max": 0.0, "mode": None,
+        self._log_stats = {"count": 0, "total": 0.0, "max": 0.0, "kind": "chat", "mode": None,
                            "http_requests": 0, "tasks": 0, "cached_tokens": 0}
+        self._log_timer = None
+        if self._log_interval > 0:
+            self._start_log_timer()
         self.model_name = model_name
         self._lock = threading.Lock()
 
-    def _record_request(self, kind: str, total_seconds: float, mode: str, http_requests: int,
-                        tasks: int, cached_tokens: int) -> None:
-        """Log one line per request, or one aggregate line every ``log_interval`` seconds."""
+    def _start_log_timer(self) -> None:
+        timer = threading.Timer(self._log_interval, self._log_tick)
+        timer.daemon = True
+        timer.start()
+        self._log_timer = timer
+
+    def _log_tick(self) -> None:
+        self._flush_log()
+        with self._log_lock:
+            self._log_timer = None
+        self._start_log_timer()
+
+    def _flush_log(self) -> None:
+        """Emit one aggregate line if any request arrived since the last flush."""
         stats = self._log_stats
         with self._log_lock:
-            stats["count"] += 1
-            stats["total"] += float(total_seconds or 0.0)
-            stats["max"] = max(stats["max"], float(total_seconds or 0.0))
-            stats["mode"] = mode
-            stats["http_requests"] = http_requests
-            stats["tasks"] = tasks
-            stats["cached_tokens"] = cached_tokens
-            now = time.perf_counter()
-            if self._log_interval > 0 and now - self._log_since < self._log_interval and stats["count"] > 1:
+            if not stats["count"]:
                 return
             count = stats["count"]
-            average = stats["total"] / count if count else 0.0
-            peak, mode = stats["max"], stats["mode"]
+            average = stats["total"] / count
+            peak = stats["max"]
+            kind, mode = stats["kind"], stats["mode"]
             http_requests, tasks = stats["http_requests"], stats["tasks"]
             cached_tokens = stats["cached_tokens"]
-            span = max(now - self._log_since, 1e-9)
             stats.update(count=0, total=0.0, max=0.0)
-            self._log_since = now
         if self._log_interval > 0:
             logger.info(
                 "%s %d request(s) in %.1fs: avg=%.4fs max=%.4fs mode=%s http_requests=%d tasks=%d cached_tokens=%d",
-                kind, count, span, average, peak, mode, http_requests, tasks, cached_tokens,
+                kind, count, self._log_interval, average, peak, mode, http_requests, tasks, cached_tokens,
             )
         else:
             logger.info(
                 "%s total=%.4fs mode=%s http_requests=%d tasks=%d cached_tokens=%d",
                 kind, average, mode, http_requests, tasks, cached_tokens,
             )
+
+    def _record_request(self, kind: str, total_seconds: float, mode: str, http_requests: int,
+                        tasks: int, cached_tokens: int) -> None:
+        """Accumulate one request; a timer emits an aggregate line every ``log_interval`` seconds."""
+        stats = self._log_stats
+        with self._log_lock:
+            stats["count"] += 1
+            stats["total"] += float(total_seconds or 0.0)
+            stats["max"] = max(stats["max"], float(total_seconds or 0.0))
+            stats["kind"] = kind
+            stats["mode"] = mode
+            stats["http_requests"] = http_requests
+            stats["tasks"] = tasks
+            stats["cached_tokens"] = cached_tokens
+        if self._log_interval <= 0:
+            self._flush_log()
 
     def decide(self, body: dict) -> dict:
         row = {key: body[key] for key in ROW_KEYS if key in body}
@@ -681,7 +701,7 @@ def help_document(model_name: str) -> dict:
             "除 /v1/chat/completions 外，其余 POST 端点需要 body 中包含 state 与 criteria（或单条决策行）。",
             "image 支持 data URI、http(s) URL、本地路径；仅当模型暴露多模态 processor 时会真正送入。",
             "Jev 式（/decide, /decide-batch, /v1/chat/completions）不生成 token；/generate 为完整自回归基线。",
-            "日志：默认 INFO 每 --log-interval 秒（默认 5）汇总一行（端点、请求数、avg/max 耗时、mode、http_requests、tasks、缓存命中）；--log-interval 0 每个请求一行；--log-level debug 额外输出每次 HTTP 访问、上游 POST、批量对话数与图像转存。",
+            "日志：默认 INFO 每 --log-interval 秒（默认 5）汇总一行（有流量才打，单次请求也会在间隔后打出）：端点、请求数、avg/max 耗时、mode、http_requests、tasks、缓存命中；--log-interval 0 每个请求一行；--log-level debug 额外输出每次 HTTP 访问、上游 POST、批量对话数与图像转存。",
             "所有响应为 UTF-8 JSON；输出格式固定，无需 JSON 修复。",
             "当前后端：" + model_name,
         ],
