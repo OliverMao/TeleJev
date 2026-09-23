@@ -282,8 +282,6 @@ curl -X POST http://127.0.0.1:8000/decide-batch \
 
 `demo/completions.html` 是 `/v1/chat/completions` 测试页：自己填 system/user 提示词（预fil 了一套监控任务清单）、可选上传或内嵌示例图像，调用后展示 `{"has_person", "violations"}`、各任务 A/B 概率、请求数/并发/耗时与原始响应。需以 `--backend vllm` 启动。
 
-`demo/batch.html` 是 vLLM 批量端点直测页：填 vLLM 地址（默认 `http://127.0.0.1:8111`）、可选图像与任务清单，直接发出**一次** `POST /v1/chat/completions/batch`（「是否有人」+ 每个任务一组对话），展示每个 choice 的 A/B 概率、组装后的 `{"has_person", "violations"}`、请求体与原始响应。不经 serve.py，适合单独验证 vLLM 端点与 logprob 读取。
-
 ```bash
 python serve.py --fake          # 启动服务
 # 浏览器打开 demo/index.html
