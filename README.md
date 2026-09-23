@@ -333,7 +333,7 @@ print(decision["option_id"], decision["probabilities"])
 python tests/test_api.py
 ```
 
-`examples/api_client.py` 是连接真实服务的可运行客户端示例。
+`examples/api_client.py` 是连接真实服务的可运行客户端示例；`examples/chat_curl.sh` 是同一 `/v1/chat/completions` 的 curl 版本（`BASE=http://127.0.0.1:22001 bash examples/chat_curl.sh`）。
 
 ## 项目结构
 
@@ -354,7 +354,7 @@ serve.py              # 入口：HTTP 服务
 start.sh              # 本地启动示例
 demo/                 # 前端页面与示例图（index.html / replay.html / fall.png）
 benchmarks/           # 对比脚本（compare_generation.py / vllm_compare.py）
-examples/             # 调用示例（api_client.py）
+examples/             # 调用示例（api_client.py / chat_curl.sh）
 tests/                # 接口离线测试（test_api.py）
 ```
 
