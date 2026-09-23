@@ -182,6 +182,7 @@ class DecisionService:
         self._frame_base = frame_base
         self._log_interval = max(0.0, float(log_interval or 0.0))
         self._log_lock = threading.Lock()
+        self._log_since = time.perf_counter()
         self._log_stats = {"count": 0, "total": 0.0, "max": 0.0, "kind": "chat", "mode": None,
                            "http_requests": 0, "tasks": 0, "cached_tokens": 0}
         self._log_timer = None
@@ -190,6 +191,11 @@ class DecisionService:
         self.model_name = model_name
         self._lock = threading.Lock()
 
+    def log_state(self) -> dict:
+        """Logging diagnostics served by /health (works even if the timer died)."""
+        with self._log_lock:
+            return {"log_interval": self._log_interval, "log_pending": self._log_stats["count"]}
+
     def _start_log_timer(self) -> None:
         timer = threading.Timer(self._log_interval, self._log_tick)
         timer.daemon = True
@@ -197,10 +203,14 @@ class DecisionService:
         self._log_timer = timer
 
     def _log_tick(self) -> None:
-        self._flush_log()
-        with self._log_lock:
-            self._log_timer = None
-        self._start_log_timer()
+        try:
+            self._flush_log()
+        except Exception:  # never let the timer chain die silently
+            logger.exception("periodic log flush failed")
+        finally:
+            with self._log_lock:
+                self._log_timer = None
+            self._start_log_timer()
 
     def _flush_log(self) -> None:
         """Emit one aggregate line if any request arrived since the last flush."""
@@ -215,6 +225,7 @@ class DecisionService:
             http_requests, tasks = stats["http_requests"], stats["tasks"]
             cached_tokens = stats["cached_tokens"]
             stats.update(count=0, total=0.0, max=0.0)
+            self._log_since = time.perf_counter()
         if self._log_interval > 0:
             logger.info(
                 "%s %d request(s) in %.1fs: avg=%.4fs max=%.4fs mode=%s http_requests=%d tasks=%d cached_tokens=%d",
@@ -228,7 +239,7 @@ class DecisionService:
 
     def _record_request(self, kind: str, total_seconds: float, mode: str, http_requests: int,
                         tasks: int, cached_tokens: int) -> None:
-        """Accumulate one request; a timer emits an aggregate line every ``log_interval`` seconds."""
+        """Accumulate one request; flush on the timer or when a new window starts."""
         stats = self._log_stats
         with self._log_lock:
             stats["count"] += 1
@@ -239,7 +250,8 @@ class DecisionService:
             stats["http_requests"] = http_requests
             stats["tasks"] = tasks
             stats["cached_tokens"] = cached_tokens
-        if self._log_interval <= 0:
+            expired = self._log_interval <= 0 or time.perf_counter() - self._log_since >= self._log_interval
+        if expired:
             self._flush_log()
 
     def decide(self, body: dict) -> dict:
@@ -745,7 +757,8 @@ class _Handler(BaseHTTPRequestHandler):
         started = time.perf_counter()
         path = self.path.split("?", 1)[0]
         if path == "/health":
-            status = self._send(200, {"status": "ok", "model": self.service.model_name})
+            status = self._send(200, {"status": "ok", "model": self.service.model_name,
+                                      **self.service.log_state()})
         elif path == "/help":
             status = self._send(200, help_document(self.service.model_name))
         elif path == "/v1/models":
@@ -852,7 +865,8 @@ def main() -> None:
         service = DecisionService(score_fn, args.model, batch_fn, generate_fn, log_interval=args.log_interval)
 
     httpd = serve(service, args.host, args.port)
-    logger.info("Serving '%s' on http://%s:%s (log level %s)", service.model_name, args.host, args.port, args.log_level)
+    logger.info("Serving '%s' on http://%s:%s (log level %s, interval %.1fs)",
+                service.model_name, args.host, args.port, args.log_level, args.log_interval)
     httpd.serve_forever()
 
 
