@@ -258,6 +258,7 @@ class VLLMBackend:
             "max_request_seconds": max(request_seconds) if request_seconds else 0.0,
             "batched": True,
             "mode": "batch" if used_batch else "fanout",
+            "cached_tokens": int((batch_usage or {}).get("cached_tokens", 0) or 0),
             "image": bool(image),
             "backend": "vllm",
             "input_tokens": input_tokens,

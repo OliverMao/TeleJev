@@ -171,7 +171,8 @@ class DecisionService:
     """Thread-safe wrapper around single-row and batch scorers."""
 
     def __init__(self, score_fn, model_name: str, batch_fn=None, generate_fn=None, score_labels_fn=None,
-                 score_labels_batch_fn=None, frame_store=None, frame_base: str | None = None):
+                 score_labels_batch_fn=None, frame_store=None, frame_base: str | None = None,
+                 log_interval: float = 0.0):
         self._score = score_fn
         self._batch = batch_fn
         self._generate = generate_fn
@@ -179,8 +180,47 @@ class DecisionService:
         self._score_labels_batch = score_labels_batch_fn
         self.frame_store = frame_store
         self._frame_base = frame_base
+        self._log_interval = max(0.0, float(log_interval or 0.0))
+        self._log_lock = threading.Lock()
+        self._log_since = time.perf_counter()
+        self._log_stats = {"count": 0, "total": 0.0, "max": 0.0, "mode": None,
+                           "http_requests": 0, "tasks": 0, "cached_tokens": 0}
         self.model_name = model_name
         self._lock = threading.Lock()
+
+    def _record_request(self, kind: str, total_seconds: float, mode: str, http_requests: int,
+                        tasks: int, cached_tokens: int) -> None:
+        """Log one line per request, or one aggregate line every ``log_interval`` seconds."""
+        stats = self._log_stats
+        with self._log_lock:
+            stats["count"] += 1
+            stats["total"] += float(total_seconds or 0.0)
+            stats["max"] = max(stats["max"], float(total_seconds or 0.0))
+            stats["mode"] = mode
+            stats["http_requests"] = http_requests
+            stats["tasks"] = tasks
+            stats["cached_tokens"] = cached_tokens
+            now = time.perf_counter()
+            if self._log_interval > 0 and now - self._log_since < self._log_interval:
+                return
+            count = stats["count"]
+            average = stats["total"] / count if count else 0.0
+            peak, mode = stats["max"], stats["mode"]
+            http_requests, tasks = stats["http_requests"], stats["tasks"]
+            cached_tokens = stats["cached_tokens"]
+            span = max(now - self._log_since, 1e-9)
+            stats.update(count=0, total=0.0, max=0.0)
+            self._log_since = now
+        if self._log_interval > 0:
+            logger.info(
+                "%s %d request(s) in %.1fs: avg=%.4fs max=%.4fs mode=%s http_requests=%d tasks=%d cached_tokens=%d",
+                kind, count, span, average, peak, mode, http_requests, tasks, cached_tokens,
+            )
+        else:
+            logger.info(
+                "%s total=%.4fs mode=%s http_requests=%d tasks=%d cached_tokens=%d",
+                kind, average, mode, http_requests, tasks, cached_tokens,
+            )
 
     def decide(self, body: dict) -> dict:
         row = {key: body[key] for key in ROW_KEYS if key in body}
@@ -218,9 +258,9 @@ class DecisionService:
             with self._lock:
                 results, timing = self._batch(state, original_image, criteria)
         timing["total_seconds"] = time.perf_counter() - started
-        logger.info(
-            "decide-batch criteria=%d mode=%s total=%.4fs",
-            len(results), timing.get("mode", "local"), timing["total_seconds"],
+        self._record_request(
+            "decide-batch", timing["total_seconds"], timing.get("mode", "local"),
+            int(timing.get("requests", 1) or 1), len(results), int(timing.get("cached_tokens", 0) or 0),
         )
         return {"results": [canonical_decision(result) for result in results], "timing": timing}
 
@@ -337,10 +377,7 @@ class DecisionService:
         }
         if batch_usage is not None:
             detail["batch_seconds"] = float(batch_usage.get("seconds", 0.0) or 0.0)
-        logger.info(
-            "chat tasks=%d http_requests=%d mode=%s total=%.4fs prompt_tokens=%d cached_tokens=%d",
-            len(tasks), http_requests, mode, total_seconds, prompt_tokens, cached_tokens,
-        )
+        self._record_request("chat", total_seconds, mode, http_requests, len(tasks), cached_tokens)
         return build_completion(self.model_name, output, detail)
 
 
@@ -643,7 +680,7 @@ def help_document(model_name: str) -> dict:
             "除 /v1/chat/completions 外，其余 POST 端点需要 body 中包含 state 与 criteria（或单条决策行）。",
             "image 支持 data URI、http(s) URL、本地路径；仅当模型暴露多模态 processor 时会真正送入。",
             "Jev 式（/decide, /decide-batch, /v1/chat/completions）不生成 token；/generate 为完整自回归基线。",
-            "日志：默认 INFO，每个请求一行（路径/状态/耗时），/v1/chat/completions 与 /decide-batch 额外输出 tasks/http_requests/mode/缓存命中；--log-level debug 可看上游每次 POST 与图像转存。",
+            "日志：默认 INFO 每 --log-interval 秒（默认 5）汇总一行（端点、请求数、avg/max 耗时、mode、http_requests、tasks、缓存命中）；--log-interval 0 每个请求一行；--log-level debug 额外输出每次 HTTP 访问、上游 POST、批量对话数与图像转存。",
             "所有响应为 UTF-8 JSON；输出格式固定，无需 JSON 修复。",
             "当前后端：" + model_name,
         ],
@@ -706,7 +743,7 @@ class _Handler(BaseHTTPRequestHandler):
                 status = self._send_bytes(content_type, payload)
         else:
             status = self._send(404, {"error": {"message": f"unknown path {self.path}", "type": "invalid_request_error"}})
-        level = logging.DEBUG if status == 200 and path.startswith(("/health", "/v1/models", "/frames/")) else logging.INFO
+        level = logging.DEBUG
         logger.log(level, "GET %s -> %s %.4fs", self.path, status, time.perf_counter() - started)
 
     def do_POST(self) -> None:
@@ -730,7 +767,7 @@ class _Handler(BaseHTTPRequestHandler):
             logger.warning("POST %s failed: %s", self.path, error, exc_info=logger.isEnabledFor(logging.DEBUG))
             status = self._send(400, {"error": {"message": str(error), "type": "invalid_request_error"}})
         finally:
-            logger.info("POST %s -> %s %.4fs", self.path, status, time.perf_counter() - started)
+            logger.debug("POST %s -> %s %.4fs", self.path, status, time.perf_counter() - started)
 
 
 def serve(service: DecisionService, host: str = "127.0.0.1", port: int = 8000) -> ThreadingHTTPServer:
@@ -756,7 +793,9 @@ def main() -> None:
                         help="URL at which the vLLM server can reach this one; enables frame-URL image spilling")
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--log-level", default="info", choices=("debug", "info", "warning", "error"),
-                        help="debug logs every upstream call and image spill; info logs one line per request")
+                        help="debug logs every request and upstream call; info logs periodic summaries")
+    parser.add_argument("--log-interval", type=float, default=5.0,
+                        help="seconds between aggregate request log lines; 0 logs every request")
     parser.add_argument("--fake", action="store_true", help="Serve a stub scorer; no GPU or model required")
     args = parser.parse_args()
 
@@ -768,7 +807,7 @@ def main() -> None:
     if args.fake:
         service = DecisionService(
             fake_scorer(), "telejev-fake", fake_batch_scorer(), fake_generate(), fake_score_labels(),
-            fake_score_labels_batch(),
+            fake_score_labels_batch(), log_interval=args.log_interval,
         )
     elif args.backend == "vllm":
         from .vllm_backend import VLLMBackend
@@ -784,12 +823,12 @@ def main() -> None:
             logger.info("Image spilling off; pass --public-url if the vLLM server can fetch this one")
         service = DecisionService(
             backend.score_row, backend.model, backend.score_batch, backend.generate, backend.score_labels,
-            backend.score_labels_batch, frame_store, frame_base,
+            backend.score_labels_batch, frame_store, frame_base, log_interval=args.log_interval,
         )
     else:
         score_fn, batch_fn, generate_fn, metadata = load_model_scorers(args.model, args.max_tokens)
         logger.info("Loaded model: multimodal=%s", metadata["multimodal"])
-        service = DecisionService(score_fn, args.model, batch_fn, generate_fn)
+        service = DecisionService(score_fn, args.model, batch_fn, generate_fn, log_interval=args.log_interval)
 
     httpd = serve(service, args.host, args.port)
     logger.info("Serving '%s' on http://%s:%s (log level %s)", service.model_name, args.host, args.port, args.log_level)
